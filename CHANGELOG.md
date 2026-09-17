@@ -16,6 +16,34 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-17 — A rejected setting no longer restart-loops the server
+
+- **A configuration fault is now told apart from a crash.** Funcom's Update 1.5
+  (server build `25351779`, published 2026-09-17 12:00 UTC) tightened the
+  display-name validation in FLS. A reporter's server then restart-looped every
+  ~10m30 for eight hours: `GatewayDeclareFarmStatus` came back
+  `INVALID_ARGUMENT / Invalid display name`, the gateway burned its ten retries
+  (~9m25 of doubling backoff) and exited, the supervisor saw a dead critical
+  service and exited 3, and Wings dutifully recreated the container — replaying
+  the same rejected name forever. The panel showed only
+  `[console] [WARN]     see logs/gateway.log`.
+- `scripts/diagnose.sh` (new) reads the dead service's log tail and recognises
+  the refusals that a restart cannot fix. `console.sh` prints the cause and the
+  exact panel variable to change, then **holds** instead of exiting: the
+  container stays up, the diagnosis stays on screen, and the operator fixes the
+  setting and restarts deliberately. Faults with no known signature keep the
+  previous behaviour (exit 3, let Wings recreate).
+- The offending value lives in **`DUNE_WORLD_TITLE`**, not
+  `DUNE_SERVER_DISPLAY_NAME` — that is the string the gateway advertises.
+  The rule is enforced on Funcom's side and is not documented; no client-side
+  validation is hard-coded here, so a future tightening surfaces as FLS's own
+  message rather than as ours going stale. Probed against FLS on 2026-09-17:
+  `[`, `]`, `|`, `&`, `:`, `/` and `,` are each accepted on their own.
+- Regression harness: `bash scripts/tests/test-diagnose.sh` (9 cases, fixtures
+  taken verbatim from the incident). The transient-failure cases are the ones
+  that matter — a false "unrecoverable" would hold a server that had been about
+  to recover.
+
 ## 2026-08-25 — Map bounds calibrated from the game itself (#116)
 
 - **Deep Desert sector labels were off by one row.** The projection bounds were
