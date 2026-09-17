@@ -22,6 +22,8 @@
 BASE="${1:-${DUNE_BASE_DIR:-}}"
 export SOURCE="console"
 source "$(dirname "$(readlink -f "$0")")/lib.sh" "$BASE"
+# Log-tail signatures that tell a configuration fault apart from a crash.
+source "$(dirname "$(readlink -f "$0")")/diagnose.sh"
 
 # Dependency order — services started in this order; stopped in reverse
 SERVICES=(postgres mq-admin mq-game text-router fls-stub mock-k8s director gateway admin-http ue5-Survival_1 ue5-Overmap ue5-DeepDesert_1)
@@ -59,6 +61,32 @@ is_critical() {
     [ "$c" = "$svc" ] && return 0
   done
   return 1
+}
+
+# Terminal state for a fault that a restart cannot fix (see diagnose.sh).
+#
+# Exiting here would hand Wings a crash it would "repair" by recreating the
+# container, which replays the same rejected configuration and wipes the
+# console that was explaining the fix -- the loop the reporter of 2026-09-17
+# sat in for eight hours. Staying alive costs nothing the battlegroup was
+# still earning (the critical service is already dead) and buys two things:
+# the diagnosis stays on screen, and the panel keeps working so the operator
+# can edit the offending variable and restart deliberately.
+#
+# Never returns. SIGTERM still reaches the trap, so a panel Stop is clean.
+hold_for_operator() {
+  local svc=$1
+  warn "──────────────────────────────────────────────────────────────"
+  warn "HELD — configuration fault, not a crash."
+  warn "Recreating the container cannot fix this, so the supervisor is"
+  warn "staying up instead of restart-looping. Apply the FIX above, then"
+  warn "restart the server from the panel."
+  warn "──────────────────────────────────────────────────────────────"
+  while true; do
+    sleep "${HOLD_REMINDER_INTERVAL:-300}" &
+    wait $!
+    warn "still HELD: $svc cannot start with the current configuration — see the FIX above"
+  done
 }
 
 # The non-critical services are worth a line when they die, but never worth
@@ -403,9 +431,19 @@ while true; do
     fi
   done
 
-  # Total-failure exit (case 1).
+  # Total-failure exit (case 1). A whole tree down is a genuine catastrophe
+  # where a restart usually is the right move, so this path still bails —
+  # but if one of the corpses left a config refusal behind, say so on the way
+  # out. The console is about to be replaced by a fresh boot's; this is the
+  # operator's only chance to read it.
   if [ "$any_alive" = 0 ]; then
     warn "All services have exited: failed — bailing out so Wings can restart"
+    for svc in "${CRITICAL_SERVICES[@]}"; do
+      if diagnosis=$(diagnose_fatal "$svc" "$LOGS/$svc.log"); then
+        warn "  $svc:"
+        while IFS= read -r line; do warn "    $line"; done <<< "$diagnosis"
+      fi
+    done
     [ -n "${TAIL_PID:-}" ] && kill "$TAIL_PID" 2>/dev/null || true
     exit 1
   fi
@@ -424,10 +462,22 @@ while true; do
       critical_dead_since=$(date +%s)
       warn "Critical service(s) not running:$dead_critical — re-checking before bailing out"
     elif [ $(( $(date +%s) - critical_dead_since )) -ge "$CRITICAL_DEAD_GRACE" ]; then
+      held_on=""
       for svc in $dead_critical; do
         warn "  $svc is down — $(critical_hint "$svc")"
         warn "    see logs/$svc.log"
+        # A service that died because a third party refused our configuration
+        # gets diagnosed here rather than left as "see the log": the operator
+        # reading this console is the only one who can fix it.
+        if diagnosis=$(diagnose_fatal "$svc" "$LOGS/$svc.log"); then
+          while IFS= read -r line; do warn "    $line"; done <<< "$diagnosis"
+          held_on="${held_on:+$held_on, }$svc"
+        fi
       done
+      # One unrecoverable service is enough: the battlegroup cannot serve
+      # without any member of CRITICAL_SERVICES, and restarting would only
+      # replay the refusal.
+      [ -n "$held_on" ] && hold_for_operator "$held_on"
       warn "Bailing out so Wings recreates the container"
       [ -n "${TAIL_PID:-}" ] && kill "$TAIL_PID" 2>/dev/null || true
       exit 3
