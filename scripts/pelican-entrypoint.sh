@@ -24,6 +24,15 @@ BASE="${DUNE_BASE_DIR:-/home/container}"
 export DUNE_BASE_DIR="$BASE"
 cd "$BASE"
 
+# Sourced for run_boot_stage / die_config / EX_CONFIG: a stage that rejects the
+# operator's configuration must hold, not hand Wings a crash to "repair" by
+# recreating the container with the same bad input. Every load-time read in
+# lib.sh is guarded by a file test, so this is safe before prestart has run.
+SOURCE="entrypoint"
+export SOURCE
+# shellcheck source=/dev/null
+source "$BASE/scripts/lib.sh" "$BASE"
+
 # Sanity: the runtime image must pre-create the K8s ServiceAccount mount.
 # AMP does this via a root-run customstart.sh hook; we do it in the
 # Dockerfile so the path already exists when the unprivileged container
@@ -33,7 +42,9 @@ if [ ! -d "$SA_DIR" ] || [ ! -w "$SA_DIR" ]; then
     echo "[entrypoint] [ERROR] $SA_DIR missing or not writable." >&2
     echo "[entrypoint] [ERROR] Your runtime Docker image must pre-create this" >&2
     echo "[entrypoint] [ERROR] directory with container-user ownership (see docker/Dockerfile)." >&2
-    exit 1
+    # Same verdict as the stages below: a wrong image is not fixed by being
+    # started again, so hold rather than feed Wings a crash to loop on.
+    hold_for_operator "entrypoint"
 fi
 
 # Generate a stable mock-k8s ServiceAccount bearer token on first boot.
@@ -59,60 +70,60 @@ echo "[entrypoint] [INFO]   External IP: ${DUNE_EXTERNAL_IP:-<unset>}"
 # so the reset is a datadir set-aside and the ordinary first-boot path
 # builds the new empty world. No marker → no-op; any doubt → boots the
 # old world untouched. See scripts/admin_worldreset.py.
-bash scripts/apply-world-reset.sh "$BASE"
+run_boot_stage scripts/apply-world-reset.sh "$BASE"
 
-bash scripts/prestart.sh         "$BASE"
+run_boot_stage scripts/prestart.sh "$BASE"
 
 # Apply panel-driven overrides to Funcom's UE5 ini files after prestart
 # seeds the templates. Every boot rewrites whatever the operator changed
 # in the panel; empty/unset env vars are skipped so manual edits survive.
 # Full mapping (env → file/section/key) lives in scripts/apply-config.sh.
-bash scripts/apply-config.sh "$BASE"
+run_boot_stage scripts/apply-config.sh "$BASE"
 
 # Inject dimensional partitions into world-template.yaml so the
 # BattleGroup CR mock-k8s exposes to Director includes them. Must come
 # before start-mock-k8s.sh because mock-k8s reads the YAML once at boot.
-bash scripts/patch-world-template.sh "$BASE"
+run_boot_stage scripts/patch-world-template.sh "$BASE"
 
-bash scripts/start-pg.sh         "$BASE"
-bash scripts/migrate-db.sh       "$BASE"
+run_boot_stage scripts/start-pg.sh "$BASE"
+run_boot_stage scripts/migrate-db.sh "$BASE"
 # Re-apply the BaseBackup wipe-guard AFTER migrations (they can replace the
 # guarded Funcom function). No-op while base-guard.json enabled:false, and
 # never blocks the boot. See scripts/admin_baseguard.py.
-bash scripts/apply-base-guard.sh "$BASE"
-bash scripts/start-mq-admin.sh   "$BASE"
-bash scripts/start-mq-game.sh    "$BASE"
-bash scripts/start-text-router.sh "$BASE"
+run_boot_stage scripts/apply-base-guard.sh "$BASE"
+run_boot_stage scripts/start-mq-admin.sh "$BASE"
+run_boot_stage scripts/start-mq-game.sh "$BASE"
+run_boot_stage scripts/start-text-router.sh "$BASE"
 # fls-stub must come before mock-k8s — mock-k8s pre-spawns AlwaysWarmMaps
 # (Survival_1, Overmap, DeepDesert_1) immediately at startup, and those
 # UE5 instances call FLS Battlegroups_IsPlayerAuthorized on first travel
 # attempt. If the stub isn't listening yet they fall back to real FLS,
 # which returns 500 "Invalid JSON" for self-hosted JWTs and blocks travel.
-bash scripts/start-fls-stub.sh   "$BASE"
-bash scripts/start-mock-k8s.sh   "$BASE"
-bash scripts/start-director.sh   "$BASE"
-bash scripts/start-gateway.sh    "$BASE"
-bash scripts/start-admin-http.sh "$BASE"
+run_boot_stage scripts/start-fls-stub.sh "$BASE"
+run_boot_stage scripts/start-mock-k8s.sh "$BASE"
+run_boot_stage scripts/start-director.sh "$BASE"
+run_boot_stage scripts/start-gateway.sh "$BASE"
+run_boot_stage scripts/start-admin-http.sh "$BASE"
 # Welcome-kit scanner (Phase 6). No-op while welcome-kit.json enabled:false, so
 # always safe to launch; grants run only after an operator enables a package.
-bash scripts/start-welcome-scanner.sh "$BASE"
+run_boot_stage scripts/start-welcome-scanner.sh "$BASE"
 # Unattended scheduler (auto-restart + auto-backup). No-op while both tasks are
 # disabled in data/admin/schedule.json, so always safe to launch.
-bash scripts/start-scheduler.sh "$BASE"
+run_boot_stage scripts/start-scheduler.sh "$BASE"
 # Market-bot autonomous loop (7b-3). No-op while market-bot.json enabled:false,
 # so always safe to launch; tops up listings + gamble-buys only once armed.
-bash scripts/start-market-bot.sh "$BASE"
+run_boot_stage scripts/start-market-bot.sh "$BASE"
 # Player chat commands (!ping/!kit — DST v13.4 port). No-op while
 # chat-commands.json enabled:false (a disabled tick also drops the chat
 # copy-queue), so always safe to launch.
-bash scripts/start-chat-commands.sh "$BASE"
+run_boot_stage scripts/start-chat-commands.sh "$BASE"
 # Demand-based autoscaler. No-op while autoscaler.json enabled:false, so always
 # safe to launch; drains idle on-demand maps + wakes/load-scales them once armed.
-bash scripts/start-autoscaler.sh "$BASE"
+run_boot_stage scripts/start-autoscaler.sh "$BASE"
 # Player-events + battlepass engines (dune-admin port). No-op while both
 # events-engine.json and battlepass.json say enabled:false, so always safe
 # to launch; zone races/milestones and the intel pass run only once armed.
-bash scripts/start-player-events.sh "$BASE"
+run_boot_stage scripts/start-player-events.sh "$BASE"
 
 # Is this server still on the build Steam publishes? The depot is downloaded
 # at install time only, so a deployment silently stays on the build it was

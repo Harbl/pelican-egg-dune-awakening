@@ -49,6 +49,58 @@ warn() { printf '[%s] [WARN] %s\n'  "$SOURCE" "$*" >&2; }
 die()  { printf '[%s] [ERROR] %s\n' "$SOURCE" "$*" >&2; exit 1; }
 
 # --------------------------------------------------------------------------
+# Configuration faults vs. failures
+#
+# die() exits 1, Wings reads any non-zero exit as a crash, and repairs a crash
+# by recreating the container. That is right for a transient failure and wrong
+# for an operator's input: a Funcom token that will not decode does not decode
+# any better on the fourth boot, so the server loops and the console that
+# explained why is wiped each time round.
+#
+# die_config is the other verdict. EX_CONFIG is sysexits.h's code for "the
+# configuration is wrong"; run_boot_stage holds on it instead of exiting, the
+# same bargain console.sh strikes when a critical service dies of a refusal
+# (see scripts/diagnose.sh).
+# --------------------------------------------------------------------------
+EX_CONFIG=78
+export EX_CONFIG
+
+die_config() { printf '[%s] [ERROR] %s\n' "$SOURCE" "$*" >&2; exit "$EX_CONFIG"; }
+
+# Terminal state for a fault a restart cannot fix. Never returns; SIGTERM still
+# reaches any trap, so a panel Stop stays clean. Used by both the boot stages
+# (via run_boot_stage) and console.sh's supervisor.
+hold_for_operator() {
+  local what=$1
+  warn "──────────────────────────────────────────────────────────────"
+  warn "HELD — configuration fault, not a crash."
+  warn "Recreating the container cannot fix this, so the boot is staying"
+  warn "put instead of restart-looping. Apply the fix above, then restart"
+  warn "the server from the panel."
+  warn "──────────────────────────────────────────────────────────────"
+  while true; do
+    sleep "${HOLD_REMINDER_INTERVAL:-300}" &
+    wait $!
+    warn "still HELD: $what cannot proceed with the current configuration — see the error above"
+  done
+}
+
+# Run one boot stage. Transparent on success; on EX_CONFIG it holds; on any
+# other failure it exits with the stage's own code, so Wings restarts exactly
+# as it always has.
+run_boot_stage() {
+  local script=$1
+  shift
+  local rc=0
+  bash "$script" "$@" || rc=$?
+  [ "$rc" = 0 ] && return 0
+  if [ "$rc" = "$EX_CONFIG" ]; then
+    hold_for_operator "$(basename "$script" .sh)"
+  fi
+  exit "$rc"
+}
+
+# --------------------------------------------------------------------------
 # Per-service rootfs paths + LD_LIBRARY_PATH builder
 # --------------------------------------------------------------------------
 rootfs()  { echo "$EXTRACTED/$1"; }

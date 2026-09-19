@@ -43,7 +43,7 @@ purge_pids
 # but defending in depth is cheap.
 SA_DIR="/var/run/secrets/kubernetes.io/serviceaccount"
 if [ ! -d "$SA_DIR" ] || [ ! -w "$SA_DIR" ]; then
-  die "K8s ServiceAccount mount $SA_DIR missing or not writable — runtime Docker image must pre-create it."
+  die_config "K8s ServiceAccount mount $SA_DIR missing or not writable — runtime Docker image must pre-create it."
 fi
 
 log "Running pre-start setup..."
@@ -52,8 +52,8 @@ log "  External IP:  $DUNE_EXTERNAL_IP"
 log "  World title:  ${DUNE_WORLD_TITLE:-<unset>}"
 log "  Region:       ${DUNE_REGION:-<unset>}"
 
-[ -n "${DUNE_JWT:-}" ] || die "Self-Host Service Token not set — paste your Funcom token into the AMP config"
-[ -d "$EXTRACTED/postgres" ] || die "extracted prerequisites missing — run the Update step first"
+[ -n "${DUNE_JWT:-}" ] || die_config "Self-Host Service Token not set — paste your token into DUNE_JWT in the panel's Startup tab (get one at https://account.duneawakening.com/)"
+[ -d "$EXTRACTED/postgres" ] || die_config "extracted prerequisites missing — run the Update step first"
 
 # --------------------------------------------------------------------------
 # Operator daemon config persistence. The admin daemons read their config from
@@ -82,7 +82,7 @@ while [ $((${#PAYLOAD} % 4)) -ne 0 ]; do PAYLOAD="${PAYLOAD}="; done
 PAYLOAD_STD=$(printf '%s' "$PAYLOAD" | tr '_-' '/+')
 DECODED=$(printf '%s' "$PAYLOAD_STD" | base64 -d 2>/dev/null || true)
 HOST_ID=$(printf '%s' "$DECODED" | jq -r '.HostId // empty' 2>/dev/null || true)
-[ -n "$HOST_ID" ] || die "couldn't decode HostId from JWT — is the token valid?"
+[ -n "$HOST_ID" ] || die_config "couldn't decode HostId from JWT — is the token valid?"
 log "  HostId: $HOST_ID"
 
 WN_FILE="$STATE/world-name"

@@ -16,6 +16,37 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-19 — A mistyped Funcom token no longer restart-loops the boot
+
+- **The first wall a new host hits looked exactly like a crash.** `console.sh`
+  learned on 2026-09-17 to tell a crash from a setting the operator must
+  change; the boot stages that run *before* it had not. `prestart.sh` called
+  `die()` — exit 1 — for a Funcom token that is missing or will not decode,
+  Wings read the non-zero exit as a crash, recreated the container, and the
+  same unreadable token failed again. Every loop wiped the console line that
+  said why.
+- `lib.sh` gains the second verdict the boot was missing: **`die_config()`**,
+  exiting `EX_CONFIG` (78, from sysexits.h), and **`run_boot_stage`**, which
+  the entrypoint now runs all 21 stages through. On 78 the boot **holds** and
+  keeps the explanation on screen; on any other code it exits exactly as
+  before, because a transient failure genuinely should be retried.
+- Four faults are now config faults: the missing token, the undecodable JWT,
+  the missing extracted depot, and the unwritable K8s ServiceAccount mount.
+  The Postgres and schema-load failures deliberately stay retryable — those
+  are the kind a restart does fix.
+- `hold_for_operator` moved from `console.sh` into `lib.sh`; the supervisor and
+  the boot stages now share one implementation of the same verdict.
+- The missing-token message stopped pointing at AMP: it now names
+  `DUNE_JWT`, the panel's Startup tab, and where to get a token.
+- Regression harness: `bash scripts/tests/test-boot-config-fault.sh` (14
+  cases). Three go red when the hold is removed; the rest are the
+  over-correction guards — an ordinary failure must *still* exit, or a server
+  that would have recovered gets stranded. Verified live by pasting a
+  truncated token into the test server: `[prestart] [ERROR] couldn't decode
+  HostId from JWT` followed by the HELD banner, container still up at
+  `RestartCount=0` 75s later, and a clean boot once the real token was put
+  back.
+
 ## 2026-09-19 — Three ways the panel left an operator in the dark
 
 All three were found while diagnosing the Deep Desert crash loop below. None of
