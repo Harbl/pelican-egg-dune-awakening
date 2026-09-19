@@ -114,6 +114,15 @@ bash scripts/start-autoscaler.sh "$BASE"
 # to launch; zone races/milestones and the intel pass run only once armed.
 bash scripts/start-player-events.sh "$BASE"
 
+# Is this server still on the build Steam publishes? The depot is downloaded
+# at install time only, so a deployment silently stays on the build it was
+# installed with; the first symptom is players hitting "M52 Outdated Client",
+# which names the client and not the server that is actually behind.
+# Backgrounded and advisory: one short HTTP lookup, nothing here blocks the
+# boot, a failed lookup prints nothing, and DUNE_BUILD_CHECK_URL=off disables
+# it outright.
+bash scripts/check-game-build.sh "$BASE" &
+
 # Spawn dimensional UE5 partitions for cross-Sietch travel destinations.
 # prestart.sh has already seeded the dim>0 world_partition rows; this
 # script materializes each as a UE5 process and wires server_id back to

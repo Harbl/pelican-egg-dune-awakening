@@ -85,6 +85,39 @@ by someone with the server's API keys, instead of by the operator.
   the rebuilt binary boots all three warm maps and Deep Desert is still
   `desired:1 current:1 healthy` at 88s uptime, well past the old 20s window,
   with no `pidfile not seen` warning.
+## 2026-09-17 — The console says when the game build has fallen behind
+
+- **An out-of-date server used to announce itself through the wrong error, on
+  the wrong machine.** The egg downloads the Funcom depot at *install* time
+  only, so a deployment stays on the build it was installed with until someone
+  reinstalls. When Update 1.5 landed (build `25351779`), a reporter's server
+  stayed on `24653560` and the first symptom was players hitting
+  **`M52 Outdated Client`** — a client-side code that points at the player's
+  machine, not at the server that actually needed updating. The revision the
+  server advertises to FLS (`2064155` against the client's `2111270`) is what
+  gets refused, and neither number is visible anywhere an operator looks.
+- `scripts/check-game-build.sh` (new) compares the installed build against the
+  one Steam publishes and prints the difference, naming M52 so the symptom and
+  the cause meet. Backgrounded from `pelican-entrypoint.sh`: it never blocks
+  the boot, and a failed lookup prints nothing at all rather than training the
+  operator to ignore a line that cries wolf. The verdict is also left in
+  `server/state/build-check.json` for the panel to read without a second
+  lookup.
+- **It does not update anything, deliberately.** Pulling 5 GB of new binaries
+  under a running server would swap the code out from under live players, and
+  a boot-time download would make every restart a bet on Funcom's CDN.
+  Reinstall stays the update, as the header of this file describes.
+- The lookup is an HTTP call to a SteamCMD mirror, not the SteamCMD this egg
+  ships: that binary is 32-bit and the runtime image carries no lib32 (the
+  installer apt-installs `lib32gcc-s1`/`libcurl4:i386` into the *install*
+  image only), so it fails there with `required file not found`. Valve
+  publishes no first-party endpoint for a branch's build id. Set
+  `DUNE_BUILD_CHECK_URL=off` to disable the call, or point it at another
+  source; `APPID` in the URL is substituted.
+- Regression harness: `bash scripts/tests/test-check-game-build.sh` (15 cases).
+  Verified live in the container on both paths — silent on the up-to-date
+  server, and the full warning against a fixture pinned to the reporter's
+  `24653560`.
 
 ## 2026-09-17 — A rejected setting no longer restart-loops the server
 
