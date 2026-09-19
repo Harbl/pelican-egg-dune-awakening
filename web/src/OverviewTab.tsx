@@ -102,6 +102,18 @@ function fmtUptime(secs: number): string {
   if (h >= 1) return `${h}h ${m}m`;
   return `${m}m`;
 }
+// "; next try in 4m" for a retry still ahead of us. A retry in the past means
+// the next reconcile tick will take it, so there is nothing useful to promise
+// and we say nothing rather than print a stale clock.
+function retryHint(iso?: string): string {
+  if (!iso) return "";
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "";
+  const s = Math.round((t - Date.now()) / 1000);
+  if (s <= 0) return "";
+  if (s < 60) return `; next try in ${s}s`;
+  return `; next try in ${Math.round(s / 60)}m`;
+}
 function relTime(iso: string): string {
   const t = new Date(iso).getTime();
   if (Number.isNaN(t)) return iso;
@@ -233,6 +245,7 @@ export function OverviewTab({ setConsoleEntries }: { setConsoleEntries: SetEntri
               .sort((a, b) => MAP_ROLE_META[mapRole(a.map)].order - MAP_ROLE_META[mapRole(b.map)].order || mapDisplayName(a.map).localeCompare(mapDisplayName(b.map)))
               .map((m) => {
                 const meta = MAP_ROLE_META[mapRole(m.map)];
+                const failures = m.consecutiveFailures ?? 0;
                 return (
                   <div key={m.map} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1 border-b border-slate-800/60 last:border-0 text-xs">
                     <span aria-hidden>{meta.icon}</span>
@@ -241,6 +254,15 @@ export function OverviewTab({ setConsoleEntries }: { setConsoleEntries: SetEntri
                     <span className={mapStatusPill(m.status) + " ml-auto"}>{m.status || "?"}</span>
                     {(m.desired != null || m.current != null) && <span className="text-slate-400 font-mono">{m.current ?? 0}/{m.desired ?? 0}</span>}
                     {m.players > 0 && <span className="text-spice-300">{m.players}p</span>}
+                    {/* A map that keeps failing to spawn says so here instead of
+                        going quiet: the count is what turns "it's broken" into
+                        "it has tried N times and will try again at HH:MM". */}
+                    {failures > 0 && (
+                      <span className="w-full text-[11px] text-amber-300">
+                        {failures} failed spawn{failures > 1 ? "s" : ""} in a row
+                        {retryHint(m.nextRetry)} — see logs/ue5-{m.map}-p*.log
+                      </span>
+                    )}
                   </div>
                 );
               })}

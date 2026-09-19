@@ -29,8 +29,20 @@ RESTARTABLE_SERVICES = (
     "mock-k8s", "director", "gateway", "text-router", "fls-stub",
 )
 
-# Strict shape for a UE5 instance log name (ue5-<Map> / ue5-<Map>-<suffix>).
-_UE5_RE = re.compile(r"^ue5-[A-Za-z0-9_]+$")
+# Strict shape for a UE5 instance log name: ue5-<Map> plus the suffixes the
+# spawner appends — the pool slot (ue5-DeepDesert_1-p2) and, for travel
+# partitions, the dimension (ue5-DeepDesert_1-dim1-p101).
+#
+# The suffix used to be missing from this pattern even though the comment
+# claimed it, so every real instance log was rejected at tail time AND filtered
+# out of list_sources. What remained was the 0-byte placeholder console.sh
+# touches per always-warm map — an operator debugging a crash-looping Deep
+# Desert opened the Logs tab and was shown an empty file (2026-09-19).
+#
+# Each segment stays [A-Za-z0-9_] with single hyphens between, so '.', '/' and
+# '..' remain unrepresentable; resolve_log_path's basename and containment
+# checks are the other two independent guards.
+_UE5_RE = re.compile(r"^ue5-[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*$")
 
 LOG_TAIL_DEFAULT = 200
 LOG_TAIL_MAX = 2000
@@ -87,15 +99,32 @@ def tail_file(path, n):
     return data.decode("utf-8", "replace").splitlines()[-n:], True
 
 
+def _size_of(path: Path) -> int:
+    """Byte size, or 0 when the file is absent/unreadable (advisory display only)."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 def list_sources(logs_dir: str):
     """Available sources: the fixed services + globbed ue5-* present on disk, each
-    flagged with whether its log file exists yet."""
+    flagged with whether its log file exists yet and how big it is.
+
+    The size matters for the UE5 entries: console.sh touches a 0-byte
+    ue5-<Map>.log per always-warm map while the instance itself logs to
+    ue5-<Map>-p<slot>.log, so both names are legitimately present and only the
+    size tells them apart. Listing both and showing the size beats hiding one,
+    which would only move the surprise."""
     root = Path(logs_dir)
-    out = [{"name": n, "exists": (root / f"{n}.log").is_file()} for n in LOG_SOURCES_FIXED]
+    out = []
+    for n in LOG_SOURCES_FIXED:
+        p = root / f"{n}.log"
+        out.append({"name": n, "exists": p.is_file(), "size": _size_of(p)})
     try:
         for f in sorted(root.glob("ue5-*.log")):
             if _UE5_RE.match(f.stem):
-                out.append({"name": f.stem, "exists": True})
+                out.append({"name": f.stem, "exists": True, "size": _size_of(f)})
     except OSError:
         pass
     return out

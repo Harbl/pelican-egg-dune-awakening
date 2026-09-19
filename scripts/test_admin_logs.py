@@ -19,10 +19,22 @@ class TestValidLogSource(unittest.TestCase):
         for n in ("ue5-Survival_1", "ue5-SH_Arrakeen", "ue5-DeepDesert_1"):
             self.assertTrue(admin_logs.valid_log_source(n))
 
+    def test_ue5_instance_suffix_ok(self):
+        # The real files on disk carry the pool slot (and the dimension for
+        # travel partitions): ue5-DeepDesert_1-p2.log, ue5-DeepDesert_1-dim1-p101.log.
+        # Rejecting the suffix made the Logs tab resolve ue5-DeepDesert_1 to the
+        # 0-byte placeholder console.sh touches, so an operator debugging a
+        # crash-looping Deep Desert was shown an empty file (2026-09-19).
+        for n in ("ue5-DeepDesert_1-p2", "ue5-Survival_1-p0",
+                  "ue5-DeepDesert_1-dim1-p101", "ue5-SH_Arrakeen-p4"):
+            self.assertTrue(admin_logs.valid_log_source(n), n)
+
     def test_rejects_junk(self):
         for n in ("", "nope", "../etc/passwd", "ue5-../x", "ue5-x/y",
-                  "admin-http/../x", "/etc/passwd", "ue5-x;rm", "admin-http.log"):
-            self.assertFalse(admin_logs.valid_log_source(n))
+                  "admin-http/../x", "/etc/passwd", "ue5-x;rm", "admin-http.log",
+                  # the suffix must not become an escape hatch
+                  "ue5-x-../y", "ue5-x-y/z", "ue5-x-", "ue5--x", "ue5-x-y.log"):
+            self.assertFalse(admin_logs.valid_log_source(n), n)
 
 
 class TestValidRestartable(unittest.TestCase):
@@ -134,6 +146,37 @@ class TestRedact(unittest.TestCase):
     def test_keeps_normal_lines(self):
         line = "[admin-http] [INFO] GET /api/status 200 in 4ms"
         self.assertEqual(admin_logs.redact(line), line)
+
+
+class TestListSources(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def _touch(self, name, body=""):
+        with open(os.path.join(self.dir, name), "w") as fh:
+            fh.write(body)
+
+    def test_lists_suffixed_ue5_instances(self):
+        # What a real logs/ dir holds: the placeholder console.sh touches, and
+        # the instance log that actually has the content.
+        self._touch("ue5-DeepDesert_1.log")
+        self._touch("ue5-DeepDesert_1-p2.log", "boom\n")
+        names = [s["name"] for s in admin_logs.list_sources(self.dir)]
+        self.assertIn("ue5-DeepDesert_1-p2", names)
+
+    def test_reports_size_so_an_empty_placeholder_is_visible(self):
+        # Both entries are offered; the operator must be able to tell the
+        # 0-byte placeholder from the instance log without clicking it.
+        self._touch("ue5-DeepDesert_1.log")
+        self._touch("ue5-DeepDesert_1-p2.log", "x" * 32)
+        by_name = {s["name"]: s for s in admin_logs.list_sources(self.dir)}
+        self.assertEqual(by_name["ue5-DeepDesert_1"]["size"], 0)
+        self.assertEqual(by_name["ue5-DeepDesert_1-p2"]["size"], 32)
+
+    def test_fixed_services_still_listed(self):
+        names = [s["name"] for s in admin_logs.list_sources(self.dir)]
+        for n in ("postgres", "director", "gateway"):
+            self.assertIn(n, names)
 
 
 if __name__ == "__main__":

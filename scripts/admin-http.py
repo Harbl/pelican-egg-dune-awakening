@@ -3431,7 +3431,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             key = admin_instances.resolve_scale_key(mock, mp)
             if key is None:
-                self._write(200, {"ok": False, "error": f"{mp} not tracked by mock-k8s"})
+                # mock-k8s only holds a ServerSetScale for a map once something
+                # has asked for it — the always-warm pre-spawn at boot, or the
+                # Director when a player first travels there. Until then there
+                # is nothing to scale, and "not tracked" alone reads like a
+                # fault in the panel rather than a map that has simply never
+                # been woken (reported 2026-09-19).
+                self._write(200, {"ok": False, "error": (
+                    f"{mp} is not tracked by mock-k8s yet — it has no scale record until it is "
+                    f"first started. Add it to DUNE_ALWAYS_WARM_MAPS to keep it up from boot, or "
+                    f"let a player travel there once; then this control works."
+                )})
                 return
             ns, name, current = key
             # Player-online guard on scale-down (DST parity): refuse unless force.

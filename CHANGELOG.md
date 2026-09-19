@@ -16,6 +16,34 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-19 — Three ways the panel left an operator in the dark
+
+All three were found while diagnosing the Deep Desert crash loop below. None of
+them caused it; together they are why it had to be diagnosed from screenshots
+by someone with the server's API keys, instead of by the operator.
+
+- **The Logs tab showed an empty file for every UE5 instance.** The pattern
+  guarding UE5 log names was `^ue5-[A-Za-z0-9_]+$` — no hyphen — while its own
+  comment claimed it accepted `ue5-<Map>-<suffix>`. Real instance logs carry
+  the pool slot (`ue5-DeepDesert_1-p2.log`) and, for travel partitions, the
+  dimension (`ue5-DeepDesert_1-dim1-p101.log`), so every one of them was
+  rejected at tail time *and* filtered out of the source list. What remained
+  was the 0-byte placeholder `console.sh` touches per always-warm map: the tab
+  answered `{"exists": true, "lines": []}` for a 492 MB log. Fixed, and
+  `list_sources` now reports each source's `size` so a placeholder is
+  distinguishable from an instance log without clicking it.
+- **A map that kept failing to spawn went quiet.** mock-k8s counts consecutive
+  failures and backs off (1m, 2m, 4m… capped at 15m), and `/api/status` has
+  been forwarding `consecutiveFailures` and `nextRetry` all along — the Fleet
+  health card just never rendered them, so Deep Desert read `failing 0/1` and
+  then nothing. It now says how many spawns failed in a row, when the next
+  attempt is due, and which log to read.
+- **The scale control refused on-demand maps with a dead end.** `SH_Arrakeen
+  not tracked by mock-k8s` reads like a panel fault; it actually means the map
+  has no scale record yet because nothing has started it. The message now says
+  so, and names the two ways to get one (add it to `DUNE_ALWAYS_WARM_MAPS`, or
+  let a player travel there once).
+
 ## 2026-09-19 — A slow-booting map no longer gets a duplicate spawned on top of it
 
 - **Deep Desert crash-looped until the spawner gave up on it.** A reporter's
