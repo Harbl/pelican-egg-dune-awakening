@@ -16,6 +16,48 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-19 — A slow-booting map no longer gets a duplicate spawned on top of it
+
+- **Deep Desert crash-looped until the spawner gave up on it.** A reporter's
+  server, freshly updated to 1.5, showed `Deep Desert failing 0/1` and then
+  nothing at all; players travelling anywhere off the warm maps sat in
+  `In Queue` for ever. The UE5 log named the killer:
+
+  ```
+  LogServerIndices: Warning: Server B connected with desired index 8, which is
+                    already assigned to A, assuming this server has shut down
+  Fatal error: [S2sController.cpp:4497] Local partition is not found
+  SIGSEGV: invalid attempt to write memory at address 0x3
+  ```
+
+  Two UE5 instances held partition 8 at once, so the newcomer evicted the
+  incumbent, which fatal'd — producing a reap, another spawn, another
+  collision, until `consecutiveFailures` hit 7 and mock-k8s parked the map at
+  `desired=0`.
+- **Where the duplicate came from, in our code.** `start-ue5.sh` backgrounds
+  UE5 and blocks on its UDP-bind handshake before writing the pidfile, so the
+  pidfile is the "I am up" signal. `capturePID` gave up waiting for it after a
+  flat **20s** — while Deep Desert takes ~40s to get there (our own autoscaler
+  config says as much). Giving up closed `pidReady`, which is exactly what
+  makes `sweep()` classify an instance as a *phantom*: it reaped a UE5 that was
+  still booting, released its port slot, and the next reconcile tick spawned a
+  second one on the same partition. The first was never killed — nothing knew
+  it existed any more.
+- **The fix is to use the signal the spawner already had:** the launcher
+  process. While `bash start-ue5.sh` is alive the instance is *starting*, so
+  `capturePID` keeps polling however long the map takes. Once the launcher has
+  exited it allows `pidWait` (20s) more for the pidfile to land, then declares
+  the spawn failed; `pidHardCap` (10m) bounds the whole wait so a hung launcher
+  cannot hold a slot for ever. Launcher identity is reuse-proofed with its
+  `/proc` start-time, like every other pid in this package.
+- Regression tests in `mock-k8s/internal/spawner/spawn_race_test.go` (4 cases).
+  Two go red when the launcher check is removed; the other two are the
+  over-correction guards — a genuinely failed spawn must still be reaped and
+  its slot returned, and a hung launcher must still hit the cap. Verified live:
+  the rebuilt binary boots all three warm maps and Deep Desert is still
+  `desired:1 current:1 healthy` at 88s uptime, well past the old 20s window,
+  with no `pidfile not seen` warning.
+
 ## 2026-09-17 — A rejected setting no longer restart-loops the server
 
 - **A configuration fault is now told apart from a crash.** Funcom's Update 1.5

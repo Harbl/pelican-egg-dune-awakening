@@ -39,9 +39,18 @@ const (
 	// during scale-down before mock-k8s escalates to SIGKILL.
 	terminateGrace = 15 * time.Second
 
-	// pidWaitTimeout bounds how long capturePID waits for start-ue5.sh to
-	// write the instance pidfile after we launch the script.
+	// pidWaitTimeout bounds how long capturePID keeps polling for the pidfile
+	// once start-ue5.sh has EXITED. While the script is still running the wait
+	// continues regardless: it blocks on UE5's UDP-bind handshake before
+	// writing the pidfile, so its own lifetime is the boot's true duration.
+	// Deep Desert takes ~40s of it — a flat 20s deadline used to expire
+	// mid-boot, which made the instance look phantom to sweep() and let a
+	// second UE5 spawn on the same partition (see spawn_race_test.go).
 	pidWaitTimeout = 20 * time.Second
+
+	// pidHardCapTimeout bounds the whole wait, launcher alive or not, so a
+	// hung start-ue5.sh cannot hold a port slot for ever.
+	pidHardCapTimeout = 10 * time.Minute
 
 	// pidPollInterval is how often capturePID re-checks for the pidfile.
 	pidPollInterval = 250 * time.Millisecond
@@ -89,6 +98,13 @@ type Spawner struct {
 	// is deterministic in tests.
 	now func() time.Time
 
+	// pidWait is how long capturePID keeps polling for the pidfile AFTER the
+	// launcher has exited; pidHardCap bounds the whole wait, including a
+	// launcher that hangs. Fields rather than constants so tests can compress
+	// them — a real boot is far too slow to wait out in a unit test.
+	pidWait    time.Duration
+	pidHardCap time.Duration
+
 	startedAt         time.Time     // process start, for /status uptime
 	reconcileInterval time.Duration // 0 when the loop is disabled
 	reconcileSweeps   int64         // ticks run
@@ -116,6 +132,14 @@ type instance struct {
 	// just-started spawn waits for the real pid instead of seeing pid==0 and
 	// orphaning the process. nil for restored instances (pid already known).
 	pidReady chan struct{}
+
+	// launcherPID/launcherStart identify the `bash start-ue5.sh` child that
+	// this spawn started. The script backgrounds UE5 and then blocks on its
+	// UDP-bind handshake before writing the pidfile, so a live launcher means
+	// "still starting" — the one signal that separates a slow boot from a
+	// spawn that failed. Zero for restored instances (their pid is known).
+	launcherPID   int
+	launcherStart uint64
 }
 
 // backoffState tracks crash-loop backoff for one map key.
@@ -139,6 +163,8 @@ func New(store *serversetscale.Store, pool *pool.Pool, scriptPath, baseDir strin
 		now:        time.Now,
 		startedAt:  time.Now(),
 		backoff:    make(map[string]backoffState),
+		pidWait:    pidWaitTimeout,
+		pidHardCap: pidHardCapTimeout,
 	}
 }
 
@@ -376,6 +402,13 @@ func (s *Spawner) spawnOne(obj serversetscale.Object, mapName string, partitionI
 		close(ready) // unblock any future waiter; nothing was tracked
 		return
 	}
+	// Remember the launcher's identity before reaping it: while this script
+	// lives, the instance is still booting, and capturePID must not time out
+	// on it. Captured before cmd.Wait() can set cmd.Process to a finished
+	// state, and reuse-proofed with its start time like every other pid here.
+	inst.launcherPID = cmd.Process.Pid
+	inst.launcherStart, _ = proc.StartTime(inst.launcherPID)
+
 	// Don't Wait() on the foreground script's result — start-ue5.sh
 	// backgrounds the real UE5 process via launch_bg and blocks on the
 	// UDP-bind handshake; reap it so it doesn't become a zombie.
@@ -391,7 +424,8 @@ func (s *Spawner) spawnOne(obj serversetscale.Object, mapName string, partitionI
 	s.bg.Add(1)
 	go func() {
 		defer s.bg.Done()
-		s.capturePID(key, alloc.Index, s.pidPath(inst.MapName, inst.Suffix), ready)
+		s.capturePID(key, alloc.Index, s.pidPath(inst.MapName, inst.Suffix), ready,
+			inst.launcherPID, inst.launcherStart)
 	}()
 }
 
@@ -400,9 +434,12 @@ func (s *Spawner) spawnOne(obj serversetscale.Object, mapName string, partitionI
 // (pid found or timed out) so teardown can stop waiting. Best-effort: if the
 // pidfile never appears the instance keeps PID 0 (teardown re-reads the
 // pidfile directly, so a missed capture is not fatal).
-func (s *Spawner) capturePID(key string, index int, pidPath string, ready chan struct{}) {
+func (s *Spawner) capturePID(key string, index int, pidPath string, ready chan struct{}, launcherPID int, launcherStart uint64) {
 	defer close(ready)
-	deadline := time.Now().Add(pidWaitTimeout)
+	hardCap := time.Now().Add(s.pidHardCap)
+	// deadline is only armed once the launcher is gone; a zero value means
+	// "still starting, keep waiting".
+	var deadline time.Time
 	for {
 		if pid := proc.ReadPidFile(pidPath); pid > 0 {
 			// Record the start-time alongside the pid so teardown/Restore can
@@ -430,7 +467,26 @@ func (s *Spawner) capturePID(key string, index int, pidPath string, ready chan s
 			}
 			return
 		}
-		if time.Now().After(deadline) {
+		// The launcher is the boot's own clock. While `bash start-ue5.sh` is
+		// alive the instance is starting, not stuck, and giving up on it is
+		// what used to manufacture a phantom for sweep() to reap.
+		if launcherPID > 0 && aliveAs(launcherPID, launcherStart) {
+			if time.Now().After(hardCap) {
+				slog.Warn("spawner: launcher still running at the hard cap — giving up on its pidfile",
+					"key", key, "path", pidPath, "launcher_pid", launcherPID, "hard_cap", s.pidHardCap)
+				return
+			}
+			deadline = time.Time{}
+			time.Sleep(pidPollInterval)
+			continue
+		}
+
+		// Launcher gone: the pidfile write may lag its exit slightly, so allow
+		// pidWait more before calling the spawn failed.
+		if deadline.IsZero() {
+			deadline = time.Now().Add(s.pidWait)
+		}
+		if time.Now().After(deadline) || time.Now().After(hardCap) {
 			slog.Warn("spawner: pidfile not seen before timeout", "key", key, "path", pidPath)
 			return
 		}
