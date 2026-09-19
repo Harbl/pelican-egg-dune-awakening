@@ -778,6 +778,13 @@ export interface StatusMapRow {
   desired?: number;
   current?: number;
   players: number;
+  /** Consecutive failed spawns; mock-k8s backs off (1m, 2m, 4m… capped at 15m)
+   *  once this passes 1. Forwarded by /api/status but never shown until now —
+   *  a reporter watched Deep Desert read "failing 0/1" and then go quiet, with
+   *  the count and the retry clock only visible in the raw JSON (2026-09-19). */
+  consecutiveFailures?: number;
+  /** RFC3339 instant of the next spawn attempt; absent/past means "next tick". */
+  nextRetry?: string;
 }
 export interface StatusGrid {
   ok: boolean;
