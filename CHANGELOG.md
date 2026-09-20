@@ -16,6 +16,41 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-20 — Travel to hubs and mission instances: the four-month workaround is gone
+
+- **One word: annotation, not label.** Since May, mock-k8s has answered the
+  Director's `LIST serversetscales` with an empty set, because a populated one
+  threw `ArgumentNullException` inside `ListServerSetScales` and stopped the
+  Director opening port 11717 — a startup failure that took the container with
+  it. The cause, decompiled out of `BattlegroupUtils.dll`:
+
+  ```csharp
+  foreach (ServerSetScale item in val.Items)
+      dictionary.Add(ModelExtensions.GetAnnotation(item, "igw.funcom.com/map-name"), item);
+  ```
+
+  `GetAnnotation`. We set that key as a **label** and never as an annotation,
+  so it read null and `Dictionary.Add` refused it. The annotation is set now,
+  in both the lazy-create path and `ensureUniformItem`; the label stays for
+  anything selecting on it.
+- **The empty list was never free.** It is why the Director could not find an
+  instance to travel a player to, so every journey to a hub or a mission
+  instance sat in the queue until `TravelRequestExpirationTimeSeconds` (300s)
+  expired. That is the **five-minute "In Queue"** a reporter timed — not a cold
+  boot: a cold mission instance measured **10 seconds** here, and the Director
+  processes its queue every second.
+- LIST now returns real items **by default**; `MOCK_K8S_LIST_ENABLE=0` is the
+  escape hatch if a future build throws again. The launcher passes the variable
+  through without inventing a default — a `0` there would have silently
+  restored the old workaround.
+- Verified live, the same experiment that failed an hour earlier: with the
+  annotation set, `LIST returning real items … count=3` and
+  `Battlegroup Director ready: success`, all warm maps up, **zero**
+  `ArgumentNullException`, `RestartCount=0`. Tests: 5 new cases in
+  `annotation_test.go`, and `TestList_EmptyByDefault` inverted into
+  `TestList_PopulatedByDefault` plus a guard that the escape hatch still empties
+  the list.
+
 ## 2026-09-20 — The scale control can start a map nobody has visited
 
 - **The button refused the only case it existed for.** `SH_Arrakeen is not
