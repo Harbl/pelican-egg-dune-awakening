@@ -24,6 +24,10 @@ export SOURCE="console"
 source "$(dirname "$(readlink -f "$0")")/lib.sh" "$BASE"
 # Log-tail signatures that tell a configuration fault apart from a crash.
 source "$(dirname "$(readlink -f "$0")")/diagnose.sh"
+# rotate_all — nothing else bounds $LOGS, and the Director alone writes GBs a
+# week at its default level. Sourced rather than exec'd so the supervisor pays
+# one process instead of one per tick.
+source "$(dirname "$(readlink -f "$0")")/rotate-logs.sh" "$BASE"
 
 # Dependency order — services started in this order; stopped in reverse
 SERVICES=(postgres mq-admin mq-game text-router fls-stub mock-k8s director gateway admin-http ue5-Survival_1 ue5-Overmap ue5-DeepDesert_1)
@@ -383,7 +387,17 @@ critical_dead_since=0
 # as a failure, then held until the service returns — one line per death,
 # never a repeating alarm.
 declare -A noncrit_misses=()
+# Log rotation runs from this loop rather than a daemon of its own: it needs no
+# state, must not outlive the container, and the supervisor is already ticking.
+# last_rotate=0 makes the first tick sweep, so a container that inherits a
+# months-old logs/ directory is bounded within seconds of booting.
+ROTATE_INTERVAL="${DUNE_LOG_ROTATE_INTERVAL:-300}"
+last_rotate=0
 while true; do
+  if [ $(( $(date +%s) - last_rotate )) -ge "$ROTATE_INTERVAL" ]; then
+    last_rotate=$(date +%s)
+    rotate_all || true
+  fi
   any_alive=0
   ue5_alive=0
   for svc in "${SERVICES[@]}"; do

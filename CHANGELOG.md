@@ -16,6 +16,35 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-20 — Logs are bounded (13 GB reclaimed on the test server)
+
+- **Nothing ever trimmed `logs/`.** The test server held a **10.4 GB**
+  `director.log` and a 1.3 GB `text-router.log`; a reporter's production server,
+  8.9 GB. The Director writes that much at its *default* `level=info` — every
+  ServerState and settings update is a full JSON payload, ~15 KB a line, on an
+  **empty** server. Profiling 200 MB of it: DBG 72.6 MB, INF 38.8 MB, and
+  87.5 MB of multi-line JSON.
+- `scripts/rotate-logs.sh` (new) cuts any log over `DUNE_LOG_MAX_MB` (200) down
+  to its last `DUNE_LOG_KEEP_MB` (50). `console.sh`'s supervisor runs it every
+  `DUNE_LOG_ROTATE_INTERVAL` (300s), starting with the first tick, so a
+  container inheriting a months-old `logs/` is bounded seconds after boot.
+- **Truncation in place, not renaming.** Every service appends with `O_APPEND`
+  (`launch_bg`), so a truncated file is picked up immediately; a renamed one
+  would leave each daemon writing to an unlinked inode — the disk would never
+  come back and the visible log would stay empty until the next restart. The
+  tail is kept rather than the file deleted: the recent end is the half an
+  operator needs, and a log that vanishes mid-incident is its own outage.
+- **The log level is left alone on purpose.** `info` is what Funcom ships and
+  what past incidents were diagnosed from; lowering it is the operator's call
+  in `director_config.ini`. Bounding the file is not.
+- Regression harness: `bash scripts/tests/test-rotate-logs.sh` (11 cases),
+  including the open-writer property that rules out rename-based rotation, and
+  a guard that sourcing the script does not steal the caller's log tag — it did,
+  in the first draft, which would have mislabelled every later supervisor line.
+  **Verified live: 13 GB → 836 MB on the test server**, marker line written into
+  `director.log` (`9930 MB dropped, last 50 MB kept`) and the Director appending
+  into it normally afterwards.
+
 ## 2026-09-19 — A mistyped Funcom token no longer restart-loops the boot
 
 - **The first wall a new host hits looked exactly like a crash.** `console.sh`
