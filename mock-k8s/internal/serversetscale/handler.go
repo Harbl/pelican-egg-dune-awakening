@@ -90,24 +90,27 @@ func handleList(s *Store, ns string, isWatch bool, w http.ResponseWriter, r *htt
 		streamWatch(s, ns, w, r)
 		return
 	}
-	// By default we return EMPTY items even when objects exist.
-	// Reason: the Director's BattlegroupUtils.Igwo.Api.ListServerSetScales
-	// builds a Dictionary keyed by some string property on each item,
-	// and on at least one of those properties our serialized objects
-	// resolve to null, throwing ArgumentNullException. At runtime
-	// Director catches the exception in ProcessingLoopCycle, but at
-	// startup the same throw bubbles up and prevents Director from
-	// opening port 11717 — which kills start-director.sh's
-	// wait_for_port and ultimately the container.
+	// We return the real list. From May to 2026-09-20 we returned an EMPTY
+	// one, because a populated list threw ArgumentNullException inside the
+	// Director's ListServerSetScales and stopped it opening port 11717 — a
+	// startup failure that took the container with it.
 	//
-	// Director doesn't strictly need LIST results: it discovers maps
-	// from the BattleGroup spec and then GETs each ServerSetScale by
-	// name (which our lazy-create handles) and PATCHes scale changes
-	// directly. Empty LIST is the cleanest workaround.
+	// The cause was one word. Decompiled from BattlegroupUtils.dll:
 	//
-	// MOCK_K8S_LIST_ENABLE=1 opts into returning the real list. Used
-	// for bisecting which field on a real item triggers the crash —
-	// flip on, enable some-items, watch Director's exception, narrow.
+	//   dictionary.Add(ModelExtensions.GetAnnotation(item, "igw.funcom.com/map-name"), item)
+	//
+	// GetANNOTATION. We set that key as a label and never as an annotation, so
+	// it read null and Dictionary.Add refused it. ensureUniformItem sets the
+	// annotation now.
+	//
+	// Returning the real list is not cosmetic: an empty one is why the Director
+	// could never find an instance to travel a player to, so every journey to a
+	// hub or a mission instance sat in the queue until
+	// TravelRequestExpirationTimeSeconds (300s) expired. That is the five-minute
+	// "In Queue" a reporter timed on 2026-09-20.
+	//
+	// MOCK_K8S_LIST_ENABLE=0 restores the empty list if a future build ever
+	// throws again.
 	items := []any{}
 	if listEnabled() {
 		omit := listOmitFields()
@@ -116,7 +119,7 @@ func handleList(s *Store, ns string, isWatch bool, w http.ResponseWriter, r *htt
 			applyOmit(m, omit)
 			items = append(items, m)
 		}
-		slog.Info("serversetscale: LIST returning real items (MOCK_K8S_LIST_ENABLE set)",
+		slog.Info("serversetscale: LIST returning real items",
 			"namespace", ns, "count", len(items), "omit", omitKeys(omit))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -129,18 +132,16 @@ func handleList(s *Store, ns string, isWatch bool, w http.ResponseWriter, r *htt
 	})
 }
 
-// listEnabled returns true if MOCK_K8S_LIST_ENABLE is set to a
-// truthy value (1, true, yes). Read on every call so the operator
-// can toggle without restarting mock-k8s — useful when bisecting
-// which field a real-list item needs to satisfy Director's
-// Dictionary.Add without flapping the container.
+// listEnabled reports whether LIST returns real items. Enabled unless
+// MOCK_K8S_LIST_ENABLE is explicitly falsey — the escape hatch, not the
+// default, now that the annotation the Director keys on is set. Read on every
+// call so an operator can flip it without restarting mock-k8s.
 func listEnabled() bool {
-	v := osLookupEnv("MOCK_K8S_LIST_ENABLE")
-	switch v {
-	case "1", "true", "TRUE", "yes", "YES":
-		return true
+	switch osLookupEnv("MOCK_K8S_LIST_ENABLE") {
+	case "0", "false", "FALSE", "no", "NO":
+		return false
 	}
-	return false
+	return true
 }
 
 // listOmitFields parses MOCK_K8S_LIST_OMIT — a comma-separated list of
@@ -192,8 +193,8 @@ func ensureUniformItem(o Object) Object {
 		labels[k] = v
 	}
 	if mn, _ := o.Spec["mapName"].(string); mn != "" {
-		if _, has := labels["igw.funcom.com/map-name"]; !has {
-			labels["igw.funcom.com/map-name"] = mn
+		if _, has := labels[mapNameKey]; !has {
+			labels[mapNameKey] = mn
 		}
 	}
 	if bg, _ := o.Spec["battlegroupName"].(string); bg != "" {
@@ -202,6 +203,33 @@ func ensureUniformItem(o Object) Object {
 		}
 	}
 	o.Metadata.Labels = labels
+
+	// The Director keys its dictionary off the ANNOTATION, not the label —
+	// decompiled from BattlegroupUtils.dll:
+	//
+	//   dictionary.Add(ModelExtensions.GetAnnotation(item, "igw.funcom.com/map-name"), item)
+	//
+	// We set only the label for months, so GetAnnotation returned null and
+	// Dictionary.Add threw ArgumentNullException at Director startup. That one
+	// crash is why LIST has been empty since May, and an empty LIST is why the
+	// Director can never find an instance to travel a player to.
+	//
+	// Cloned like the labels map so the stored object is never mutated. Left
+	// unset when spec has no mapName: an invented key would point the Director
+	// at the wrong map, which is worse than the item having no entry.
+	annotations := make(map[string]string, len(o.Metadata.Annotations)+1)
+	for k, v := range o.Metadata.Annotations {
+		annotations[k] = v
+	}
+	if mn, _ := o.Spec["mapName"].(string); mn != "" {
+		if _, has := annotations[mapNameKey]; !has {
+			annotations[mapNameKey] = mn
+		}
+	}
+	if len(annotations) > 0 {
+		o.Metadata.Annotations = annotations
+	}
+
 	if o.Status == nil {
 		o.Status = map[string]any{
 			"observedGeneration": o.Metadata.Generation,

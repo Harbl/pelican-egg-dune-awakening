@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
@@ -14,8 +15,10 @@ func withEnv(t *testing.T, enable bool, omit string) {
 	osLookupEnv = func(name string) string {
 		switch name {
 		case "MOCK_K8S_LIST_ENABLE":
-			if enable {
-				return "1"
+			// "" is the real default (unset) and now means ENABLED; an
+			// operator disabling the list writes an explicit 0.
+			if !enable {
+				return "0"
 			}
 		case "MOCK_K8S_LIST_OMIT":
 			return omit
@@ -61,12 +64,36 @@ func listItems(t *testing.T, s *Store) []any {
 	return items
 }
 
-func TestList_EmptyByDefault(t *testing.T) {
+// Until 2026-09-20 this asserted the opposite: LIST was empty by default,
+// because a populated one crashed the Director. The cause turned out to be the
+// map-name key being set as a label when the Director reads it as an
+// annotation (see ensureUniformItem), and an empty LIST was never free — it is
+// why the Director could not find an instance to travel a player to.
+func TestList_PopulatedByDefault(t *testing.T) {
+	osLookupEnv = func(string) string { return "" } // nothing set: the real default
+	t.Cleanup(func() { osLookupEnv = func(name string) string { return os.Getenv(name) } })
+	s := NewStore()
+	seedBare(t, s, "sietch-survival", "Survival_1")
+	items := listItems(t, s)
+	if len(items) != 1 {
+		t.Fatalf("default LIST should carry real items, got %d", len(items))
+	}
+	it := items[0].(map[string]any)
+	md := it["metadata"].(map[string]any)
+	ann, _ := md["annotations"].(map[string]any)
+	if ann == nil || ann["igw.funcom.com/map-name"] != "Survival_1" {
+		t.Fatalf("default LIST item lacks the annotation the Director keys on: %v", md)
+	}
+}
+
+// The escape hatch stays: a future build that throws again can be taken back
+// to the old behaviour without shipping a new binary.
+func TestList_EmptyWhenExplicitlyDisabled(t *testing.T) {
 	withEnv(t, false, "")
 	s := NewStore()
 	seedBare(t, s, "sietch-survival", "Survival_1")
 	if items := listItems(t, s); len(items) != 0 {
-		t.Fatalf("default LIST should be empty even with objects present, got %d", len(items))
+		t.Fatalf("MOCK_K8S_LIST_ENABLE=0 should empty the LIST, got %d", len(items))
 	}
 }
 

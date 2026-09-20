@@ -53,6 +53,12 @@ type Event struct {
 // LazyMapInfo carries the fields needed to materialize a ServerSetScale
 // the first time the Director GETs it by name. Populated by main.go
 // from the BattleGroup spec at startup.
+// mapNameKey is the metadata key the Director reads, with GetAnnotation, to
+// key its ServerSetScale dictionary. A null value there throws
+// ArgumentNullException inside ListServerSetScales and takes the Director down
+// at startup.
+const mapNameKey = "igw.funcom.com/map-name"
+
 type LazyMapInfo struct {
 	MapName     string
 	PartitionID int64
@@ -172,17 +178,24 @@ func (s *Store) GetOrLazyCreate(namespace, name string) (Object, bool) {
 	}
 	// Build the SSS shape with the labels Director's deserializer
 	// reads as Dictionary keys when iterating ListServerSetScales. The
-	// k8s labels `igw.funcom.com/map-name` and
-	// `igw.funcom.com/battlegroup-name` show up in the Director
-	// binary's strings as resource identifiers — populating them is
-	// the most likely cure for the null-key Dictionary.Add crash.
+	// The Director reads `igw.funcom.com/map-name` as an ANNOTATION
+	// (ModelExtensions.GetAnnotation, decompiled from BattlegroupUtils.dll);
+	// the matching label is set too, for anything that selects on it.
 	obj := Object{
 		Metadata: Metadata{
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
 				"igw.funcom.com/battlegroup-name": lc.WorldName,
-				"igw.funcom.com/map-name":         info.MapName,
+				mapNameKey:                        info.MapName,
+			},
+			// The annotation is the one that matters: the Director reads this
+			// key with GetAnnotation, and a null there is the
+			// ArgumentNullException that kept LIST empty (see
+			// ensureUniformItem). The label is kept for anything selecting on
+			// it.
+			Annotations: map[string]string{
+				mapNameKey: info.MapName,
 			},
 		},
 		Spec: map[string]any{

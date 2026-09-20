@@ -21,8 +21,12 @@ fi
 
 log "Starting mock Kubernetes API (port pool size ${K8S_POOL_SIZE:-25})..."
 
+# MOCK_K8S_LIST_ENABLE is passed through, never defaulted: mock-k8s returns
+# the real list unless it is explicitly falsey, and a "0" invented here would
+# silently restore the empty-LIST workaround that broke instanced travel.
 launch_bg mock-k8s "$LOGS/mock-k8s.log" -- \
   env PYTHONUNBUFFERED=1 \
+      MOCK_K8S_LIST_ENABLE="${MOCK_K8S_LIST_ENABLE:-}" \
       AMP_TOKEN="$AMP_TOKEN" \
       K8S_MOCK_PORT="${K8S_MOCK_PORT:-6443}" \
       K8S_POOL_SIZE="${K8S_POOL_SIZE:-25}" \
