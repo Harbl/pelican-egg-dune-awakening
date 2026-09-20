@@ -259,7 +259,7 @@ resolve_player_id() {
             # Defence in depth.
             local resolved
             resolved=$(dune_psql_q --set=sid="$sid" -tA 2>/dev/null <<'SQL' | tr -d '\r\n'
-SELECT "user" FROM dune.encrypted_accounts WHERE platform_id=:'sid' AND platform_name='Steam' LIMIT 1
+SELECT "user" FROM dune.accounts WHERE platform_id=:'sid' AND platform_name='Steam' LIMIT 1
 SQL
 )
             if [ -z "$resolved" ]; then
@@ -776,8 +776,11 @@ case "$cmd" in
     players)
         sub="${1:-all}"
         case "$sub" in
+            # Filtering happens AFTER the per-account row is chosen (see the
+            # query below), so it reads the authoritative row rather than
+            # whichever duplicate happened to say 'Online'.
             all)    where_clause="" ;;
-            online) where_clause="WHERE ps.online_status='Online'" ;;
+            online) where_clause="WHERE t.online='Online'" ;;
             *)
                 echo "[admin-publish] ERROR usage: players [all|online]" >&2
                 exit 2
@@ -788,18 +791,42 @@ case "$cmd" in
         # self-host). convert_from('UTF8') decodes it; on a stack where
         # encryption is enabled this returns gibberish and the UI just
         # falls back to the FLS id.
+        # ONE row per account (issue #121). An account can carry more than one
+        # encrypted_player_state row — a self-restore or an interrupted
+        # transfer leaves the previous one behind with dangling actor links —
+        # and a plain LEFT JOIN turned each of those into a second line in the
+        # panel. The husk keeps its last online_status, so it showed as
+        # permanently Online, and its character name is empty, so the UI fell
+        # back to printing the FLS id where the name goes. That is exactly what
+        # the reporter saw: every player twice, once correct and once a
+        # never-leaving stranger named after their own id.
+        #
+        # DISTINCT ON picks the live row using the same definition of "husk"
+        # that char_state_sweep deletes by (no player_controller_id, or one
+        # that no longer resolves to an actor), then the most recent activity.
+        # Read from dune.accounts, not encrypted_accounts: DA-19433 encrypted
+        # platform_id at rest and moved the readable copy to that view, which
+        # is what the rest of this script already queries.
         dune_psql -c "
-            SELECT a.\"user\"           AS fls_id,
-                   COALESCE(convert_from(ps.encrypted_character_name, 'UTF8'), '-') AS character,
-                   a.platform_id        AS steam_id,
-                   a.platform_name,
-                   COALESCE(ps.life_state::text, '-')      AS life,
-                   COALESCE(ps.online_status::text, '-')   AS online,
-                   ps.last_avatar_activity
-            FROM dune.encrypted_accounts a
-            LEFT JOIN dune.encrypted_player_state ps ON ps.account_id = a.id
+            SELECT * FROM (
+                SELECT DISTINCT ON (a.id)
+                       a.\"user\"           AS fls_id,
+                       COALESCE(convert_from(ps.encrypted_character_name, 'UTF8'), '-') AS character,
+                       a.platform_id        AS steam_id,
+                       a.platform_name,
+                       COALESCE(ps.life_state::text, '-')      AS life,
+                       COALESCE(ps.online_status::text, '-')   AS online,
+                       ps.last_avatar_activity
+                FROM dune.accounts a
+                LEFT JOIN dune.encrypted_player_state ps ON ps.account_id = a.id
+                ORDER BY a.id,
+                         (ps.player_controller_id IS NOT NULL
+                          AND EXISTS (SELECT 1 FROM dune.actors ac
+                                       WHERE ac.id = ps.player_controller_id)) DESC,
+                         ps.last_avatar_activity DESC NULLS LAST
+            ) t
             $where_clause
-            ORDER BY ps.last_avatar_activity DESC NULLS LAST
+            ORDER BY t.last_avatar_activity DESC NULLS LAST
             LIMIT 100
         "
         exit 0
@@ -1687,9 +1714,23 @@ $(baseperm_guard_sql "$bid" "base-transfer-custodian")
            OR EXISTS (SELECT 1 FROM dune.actors WHERE id IN (900000201, 900000202, 900000203)) THEN
             RAISE EXCEPTION 'base-transfer-custodian: a conflicting partial Server identity (account 9000002 / actors 9000002xx) already exists — refusing to guess; inspect and remove it first';
         END IF;
-        INSERT INTO dune.encrypted_accounts (id, "user", encrypted_funcom_id, takeoverable, platform_id, platform_name)
-        VALUES (9000002, '5E121CE000000001', dune.encrypt_user_data('Server#4242'), false, 'pelican-egg', 'Pelican Egg Admin')
-        ON CONFLICT (id) DO NOTHING;
+        -- platform_id was encrypted at rest and renamed to
+        -- encrypted_platform_id by DA-19433 (GDPR); reads moved to the
+        -- dune.accounts view, but an INSERT has to name a real column, and
+        -- which one exists depends on whether that migration has run. Pick it
+        -- at execution time rather than assuming: this same statement has to
+        -- work on a battlegroup that predates the migration.
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'dune' AND table_name = 'encrypted_accounts'
+                      AND column_name = 'encrypted_platform_id') THEN
+            INSERT INTO dune.encrypted_accounts (id, "user", encrypted_funcom_id, takeoverable, encrypted_platform_id, platform_name)
+            VALUES (9000002, '5E121CE000000001', dune.encrypt_user_data('Server#4242'), false, dune.encrypt_user_data('pelican-egg'), 'Pelican Egg Admin')
+            ON CONFLICT (id) DO NOTHING;
+        ELSE
+            INSERT INTO dune.encrypted_accounts (id, "user", encrypted_funcom_id, takeoverable, platform_id, platform_name)
+            VALUES (9000002, '5E121CE000000001', dune.encrypt_user_data('Server#4242'), false, 'pelican-egg', 'Pelican Egg Admin')
+            ON CONFLICT (id) DO NOTHING;
+        END IF;
         INSERT INTO dune.actors (id, class, map, partition_id, dimension_index, owner_account_id) VALUES
             (900000201, '/Game/Dune/Characters/Player/BP_DunePlayerController.BP_DunePlayerController_C', 'HaggaBasin', 1, 0, 9000002),
             (900000202, '/Script/DuneSandbox.DunePlayerState', 'HaggaBasin', 1, 0, 9000002),
@@ -2623,7 +2664,7 @@ SELECT a."user"                            AS fls_id,
        ps.last_avatar_activity             AS last_activity,
        pc.pc_actor_id                      AS pc_actor_id,
        pc.map                              AS map
-FROM dune.encrypted_accounts a
+FROM dune.accounts a
 LEFT JOIN dune.encrypted_player_state ps ON ps.account_id = a.id
 LEFT JOIN LATERAL (
     SELECT ac.id AS pc_actor_id, ac.map
