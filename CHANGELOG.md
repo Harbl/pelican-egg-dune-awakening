@@ -16,6 +16,35 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-20 — `players` reads the right table again, and stops seeing double (#121)
+
+- **The listing had stopped working entirely.** `admin players` answered
+  `ERROR: column a.platform_id does not exist`. Funcom's migration
+  `DA-19433_encrypt_platform_id.sql` encrypted that column at rest for GDPR —
+  it is `encrypted_platform_id bytea` now — and its own header says where the
+  readable copy went: *"expose a decrypted copy through the `accounts` view.
+  All reads/lookups already go through that view."* Ours did not. The three
+  stragglers (`players`, `resolve steam:<id>`, `player-state`) now read
+  `dune.accounts`, like the rest of the script already did.
+- **The duplicate players of issue #121 are gone.** An account can carry more
+  than one `encrypted_player_state` row — a self-restore or an interrupted
+  transfer leaves the previous one behind with dangling actor links — and a
+  plain `LEFT JOIN` turned each into a second line in the panel. The husk keeps
+  its last `online_status`, so it showed as permanently **Online**, and its
+  character name is empty, so the UI printed the FLS id where the name goes:
+  every player twice, once correctly and once as a never-leaving stranger named
+  after their own id. `DISTINCT ON` now picks the live row per account, using
+  the same definition of "husk" that `char_state_sweep` deletes by. The
+  `online` filter is applied **after** that choice, so a stale row can no longer
+  inflate the online list.
+- The Server-persona `INSERT` picks its column at execution time from
+  `information_schema`, so it works on a battlegroup that predates DA-19433 as
+  well as one that has run it.
+- Verified live, both shapes against the same row: with a synthetic husk
+  injected, the old query returned 3 rows including
+  `DE0BCCAA2501BF22 | (no name) | Online`, the new one returned 2 and
+  `players online` returned 0. Husk removed afterwards; the database is back to
+  its two original rows.
 ## 2026-09-20 — Logs are bounded (13 GB reclaimed on the test server)
 
 - **Nothing ever trimmed `logs/`.** The test server held a **10.4 GB**
