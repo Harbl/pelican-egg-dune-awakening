@@ -47,6 +47,10 @@ FILES = {
     "UserGame":      f"{BASE}/server/state/ue5-saved/UserSettings/UserGame.ini",
     "UserOverrides": f"{BASE}/server/state/UserOverrides.ini",
     "ondemand":      f"{BASE}/server/state/ondemand.ini",
+    # New in Update 1.5: Funcom's own custom-rules file. Flat key=value, and
+    # it lives beside UserEngine/UserGame because UE5 reads all three from the
+    # same UserSettings directory (start-ue5.sh symlinks it into place).
+    "UserServerCustomSettings": f"{BASE}/server/state/ue5-saved/UserSettings/UserServerCustomSettings.ini",
 }
 SCHEMA = f"{BASE}/data/admin/settings-schema.json"
 

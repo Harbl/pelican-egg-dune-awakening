@@ -16,6 +16,41 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-20 — Update 1.5's custom-rules file is wired into the panel
+
+- **1.5 shipped a settings file we never seeded.** The patch notes say it
+  plainly — *"Added a new UserServerCustomSettings.ini file for self-hosted
+  servers"* — and it was sitting in the depot next to `UserEngine.ini` and
+  `UserGame.ini`, which `prestart.sh` has always seeded. Ours never mentioned
+  it, so 45 knobs Funcom exposed were inert, and the new client-side
+  "server settings" screen showed players Funcom's defaults rather than the
+  operator's.
+- `prestart.sh` seeds it like the other two (only when absent, so operator
+  edits survive), and it is now a sink in **both** file maps — `apply-config.sh`
+  and `admin-http.py` keep separate tables over the same files, and a setting
+  missing from either is a control nobody can use. That is exactly how the
+  first attempt failed: the panel answered
+  `target INI sink 'UserServerCustomSettings' is missing`.
+- **39 of the 45 keys are exposed**, in five new panel categories — combat and
+  NPC multipliers, thirst/heat/stamina, crafting and gathering economy, XP and
+  Intel gain, Landsraad multipliers, building piece limits and stability, death
+  and sandworm loot rules. They need no egg re-import: like 176 of the existing
+  202, they carry no env var and are written straight to the file by the panel.
+- **The other 6 are deliberately left out.** `PVPMode`, `GatheringAmount`,
+  `bAllowSandstorms`, `bAllowSandworms`, `bIsBuildingRestrictionsEnabled` and
+  `FiefdomLimit` are the ones Funcom itself ships commented out, each annotated
+  `/!\ already exposed in UserEngine.ini / UserGame.ini` — keys we already
+  write through the old path. Exposing both would give an operator two controls
+  that can disagree, and which one wins is an in-game question nobody has
+  answered yet.
+- `BuildingPieceLimitMultiplier` answers issue **#120** (remove the building
+  limits), which was closed for want of a lever.
+- Verified live end to end: the file is seeded at boot
+  (`seeded admin file: UserSettings/UserServerCustomSettings.ini`), the panel
+  lists 241 settings across the new categories, and writing three of them —
+  a float, another float and a bool — lands them in the file in place, with
+  Funcom's comments intact. Restored to defaults afterwards.
+
 ## 2026-09-20 — Travel to hubs and mission instances: the four-month workaround is gone
 
 - **One word: annotation, not label.** Since May, mock-k8s has answered the

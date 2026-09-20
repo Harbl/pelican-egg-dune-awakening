@@ -129,6 +129,12 @@ INI_FILES = {
     # cleanly — the designed sink for the [/Script/...] catalogue (no env vars).
     "UserOverrides": BASE_DIR + "/server/state/UserOverrides.ini",
     "ondemand": BASE_DIR + "/server/state/ondemand.ini",
+    # Funcom's custom-rules file, new in Update 1.5. Flat key=value, and it
+    # sits beside UserEngine/UserGame because UE5 reads all three out of the
+    # same UserSettings directory. Must stay in step with apply-config.sh's
+    # FILES map — the two are separate tables over the same sinks, and a
+    # setting missing from either one is a control the operator cannot use.
+    "UserServerCustomSettings": BASE_DIR + "/server/state/ue5-saved/UserSettings/UserServerCustomSettings.ini",
 }
 STATE_DIR = BASE_DIR + "/state"
 PUBLISH_SH = SCRIPTS_DIR + "/admin-publish.sh"
