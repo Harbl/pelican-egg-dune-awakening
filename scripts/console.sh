@@ -63,31 +63,13 @@ is_critical() {
   return 1
 }
 
-# Terminal state for a fault that a restart cannot fix (see diagnose.sh).
-#
-# Exiting here would hand Wings a crash it would "repair" by recreating the
-# container, which replays the same rejected configuration and wipes the
-# console that was explaining the fix -- the loop the reporter of 2026-09-17
-# sat in for eight hours. Staying alive costs nothing the battlegroup was
-# still earning (the critical service is already dead) and buys two things:
-# the diagnosis stays on screen, and the panel keeps working so the operator
-# can edit the offending variable and restart deliberately.
-#
-# Never returns. SIGTERM still reaches the trap, so a panel Stop is clean.
-hold_for_operator() {
-  local svc=$1
-  warn "──────────────────────────────────────────────────────────────"
-  warn "HELD — configuration fault, not a crash."
-  warn "Recreating the container cannot fix this, so the supervisor is"
-  warn "staying up instead of restart-looping. Apply the FIX above, then"
-  warn "restart the server from the panel."
-  warn "──────────────────────────────────────────────────────────────"
-  while true; do
-    sleep "${HOLD_REMINDER_INTERVAL:-300}" &
-    wait $!
-    warn "still HELD: $svc cannot start with the current configuration — see the FIX above"
-  done
-}
+# hold_for_operator — the terminal state for a fault a restart cannot fix —
+# now lives in lib.sh, because the boot stages that run before this supervisor
+# need exactly the same verdict (a Funcom token that will not decode is not a
+# crash either). Exiting here would hand Wings a crash it would "repair" by
+# recreating the container, replaying the rejected configuration and wiping
+# the console that was explaining the fix — the loop the reporter of
+# 2026-09-17 sat in for eight hours.
 
 # The non-critical services are worth a line when they die, but never worth
 # recreating the container for — the battlegroup keeps running without them.
