@@ -30,6 +30,36 @@ class TestResolveScaleKey(unittest.TestCase):
         self.assertIsNone(inst.resolve_scale_key({"maps": [{"map": "DeepDesert_1", "desired": 1}]}, "DeepDesert_1"))
         self.assertIsNone(inst.resolve_scale_key({"maps": [{"map": "DeepDesert_1", "key": "", "desired": 1}]}, "DeepDesert_1"))
 
+
+class TestKnownMapName(unittest.TestCase):
+    """The hub maps an operator most wants to start by hand are exactly the ones
+    with no ServerSetScale yet, because nobody has travelled there. mock-k8s can
+    materialise one on a by-name GET; the panel just needs the canonical name,
+    which /status now carries as knownMaps."""
+
+    STATUS = {
+        "maps": [{"map": "Survival_1", "key": "default/w-survival-1", "desired": 1}],
+        "knownMaps": [
+            {"map": "Survival_1", "name": "w-survival-1", "partitionId": 1},
+            {"map": "SH_Arrakeen", "name": "w-sh-arrakeen", "partitionId": 3},
+        ],
+    }
+
+    def test_finds_a_map_that_has_no_scale_record_yet(self):
+        self.assertEqual(inst.known_map_name(self.STATUS, "SH_Arrakeen"), "w-sh-arrakeen")
+
+    def test_unknown_map_returns_none(self):
+        self.assertIsNone(inst.known_map_name(self.STATUS, "SH_FallenLight"))
+
+    def test_absent_known_maps_returns_none(self):
+        # An older mock-k8s binary predates the field; the panel must degrade to
+        # the previous behaviour rather than raise mid-request.
+        self.assertIsNone(inst.known_map_name({"maps": []}, "SH_Arrakeen"))
+        self.assertIsNone(inst.known_map_name(None, "SH_Arrakeen"))
+
+    def test_entry_without_a_name_is_ignored(self):
+        self.assertIsNone(inst.known_map_name({"knownMaps": [{"map": "SH_Arrakeen"}]}, "SH_Arrakeen"))
+
     def test_no_maps_returns_none(self):
         self.assertIsNone(inst.resolve_scale_key({}, "DeepDesert_1"))
         self.assertIsNone(inst.resolve_scale_key({"maps": []}, "DeepDesert_1"))

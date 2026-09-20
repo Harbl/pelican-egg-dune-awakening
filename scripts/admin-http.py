@@ -3431,16 +3431,29 @@ class Handler(BaseHTTPRequestHandler):
                 return
             key = admin_instances.resolve_scale_key(mock, mp)
             if key is None:
-                # mock-k8s only holds a ServerSetScale for a map once something
-                # has asked for it — the always-warm pre-spawn at boot, or the
-                # Director when a player first travels there. Until then there
-                # is nothing to scale, and "not tracked" alone reads like a
-                # fault in the panel rather than a map that has simply never
-                # been woken (reported 2026-09-19).
+                # A map only has a ServerSetScale once something has asked for
+                # it — the always-warm pre-spawn at boot, or the Director when a
+                # player first travels there. The hub maps an operator wants to
+                # start by hand are exactly the ones that fail that test, so the
+                # control used to refuse the only case it existed for.
+                #
+                # mock-k8s holds a lazy-create recipe for every map in the
+                # BattleGroup template and materialises it on the first by-name
+                # GET. Do that GET, then carry on: the button now starts the map
+                # instead of explaining why it cannot.
+                canonical = admin_instances.known_map_name(mock, mp)
+                if canonical:
+                    admin_instances.mock_k8s_request(
+                        "GET",
+                        f"/apis/igw.funcom.com/v1/namespaces/default/serversetscales/{canonical}")
+                    mock = fetch_mock_status(MOCK_K8S_PORT)
+                    key = admin_instances.resolve_scale_key(mock, mp)
+            if key is None:
+                # Short on purpose: the panel truncates a long error, and a
+                # half-sentence helps nobody (seen on a reporter's UI).
                 self._write(200, {"ok": False, "error": (
-                    f"{mp} is not tracked by mock-k8s yet — it has no scale record until it is "
-                    f"first started. Add it to DUNE_ALWAYS_WARM_MAPS to keep it up from boot, or "
-                    f"let a player travel there once; then this control works."
+                    f"{mp} has no scale record and mock-k8s would not create one — "
+                    f"is it in this world's BattleGroup template?"
                 )})
                 return
             ns, name, current = key

@@ -87,6 +87,26 @@ def mock_k8s_request(method: str, path: str, body: "dict | None" = None,
         return None, None
 
 
+def known_map_name(mock_status: "dict | None", mp: str) -> "str | None":
+    """Pure. The canonical ServerSetScale name mock-k8s would materialise for map
+    `mp`, from /status's knownMaps, or None.
+
+    resolve_scale_key only sees maps that already HAVE a scale record, which is
+    never true of a hub nobody has travelled to — precisely the map an operator
+    wants to start by hand. mock-k8s holds a lazy-create recipe for every map in
+    the BattleGroup template and materialises one on the first by-name GET; this
+    is how the panel learns which name to ask for.
+
+    Returns None on an older mock-k8s that has no knownMaps field, so the caller
+    degrades to the previous behaviour instead of raising mid-request."""
+    if not isinstance(mock_status, dict):
+        return None
+    entry = next((m for m in mock_status.get("knownMaps", []) if m.get("map") == mp), None)
+    if not entry or not entry.get("name"):
+        return None
+    return str(entry["name"])
+
+
 def resolve_scale_key(mock_status: "dict | None", mp: str) -> "tuple[str, str, int] | None":
     """Pure. Given a mock-k8s /status snapshot, find map `mp`'s ServerSetScale
     and return (namespace, name, current_desired), or None if the map isn't
