@@ -1,6 +1,9 @@
 package spawner
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // reconcileNamespace is the single namespace mock-k8s serves (lazy-create and
 // the Director both use "default").
@@ -15,6 +18,21 @@ type Snapshot struct {
 	Instances     InstanceStats  `json:"instances"`
 	Persist       PersistStats   `json:"persist"`
 	Maps          []MapStatus    `json:"maps"`
+
+	// KnownMaps is every map the BattleGroup template can materialise on a
+	// by-name GET, whether or not it has been started yet. Maps above lists
+	// only what already exists, which left the panel unable to scale a map
+	// nobody had visited: it had no way to learn the canonical name to ask
+	// for, so its control answered "not tracked by mock-k8s" and stopped.
+	KnownMaps []KnownMap `json:"knownMaps,omitempty"`
+}
+
+// KnownMap is one lazy-create recipe: the game's map name and the
+// ServerSetScale name that materialises it.
+type KnownMap struct {
+	Map         string `json:"map"`
+	Name        string `json:"name"`
+	PartitionID int64  `json:"partitionId"`
 }
 
 type ReconcileStats struct {
@@ -107,5 +125,17 @@ func (s *Spawner) Snapshot() Snapshot {
 		snap.Maps = append(snap.Maps, ms)
 	}
 	s.mu.Unlock()
+
+	// Read the recipes through the store's own lock, outside s.mu. Sorted by
+	// canonical name: the panel renders this, and a Go map's iteration order
+	// would reshuffle it on every poll.
+	for _, km := range s.store.KnownMaps() {
+		snap.KnownMaps = append(snap.KnownMaps, KnownMap{
+			Map: km.MapName, Name: km.Name, PartitionID: km.PartitionID,
+		})
+	}
+	sort.Slice(snap.KnownMaps, func(i, j int) bool {
+		return snap.KnownMaps[i].Name < snap.KnownMaps[j].Name
+	})
 	return snap
 }

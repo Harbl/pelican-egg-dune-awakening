@@ -125,6 +125,32 @@ func (s *Store) Get(namespace, name string) (Object, bool) {
 	return o, ok
 }
 
+// KnownMap is one lazy-create recipe, flattened for callers that need to know
+// which maps COULD be materialised — not just which ones already were. The
+// panel uses it to turn a map name into the canonical name to GET, which is
+// what makes a never-started map scalable from the UI at all.
+type KnownMap struct {
+	Name        string
+	MapName     string
+	PartitionID int64
+}
+
+// KnownMaps returns every lazy-create recipe the store holds. Unordered (the
+// caller sorts); empty when no template has been loaded.
+func (s *Store) KnownMaps() []KnownMap {
+	s.mu.Lock()
+	lc := s.LazyCreator
+	s.mu.Unlock()
+	if lc == nil {
+		return nil
+	}
+	out := make([]KnownMap, 0, len(lc.Maps))
+	for name, info := range lc.Maps {
+		out = append(out, KnownMap{Name: name, MapName: info.MapName, PartitionID: info.PartitionID})
+	}
+	return out
+}
+
 // GetOrLazyCreate returns the object if it exists; otherwise, if
 // LazyCreator has a recipe for this name, materializes it on the fly
 // and returns the freshly-created object. Used by the handler's

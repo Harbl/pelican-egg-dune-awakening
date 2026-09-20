@@ -16,6 +16,35 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-20 — The scale control can start a map nobody has visited
+
+- **The button refused the only case it existed for.** `SH_Arrakeen is not
+  tracked by mock-k8s` — reported again right after a Reinstall. A map only has
+  a ServerSetScale once something has asked for it (the always-warm pre-spawn,
+  or the Director when a player first travels there), so the hub maps an
+  operator wants to start by hand are exactly the ones that failed the test.
+  The previous fix only reworded the refusal; the reporter's panel then
+  truncated the longer sentence mid-word, which helped nobody.
+- mock-k8s holds a lazy-create recipe for **every** map in the BattleGroup
+  template (35 on a stock 1.5 world) and materialises one on the first by-name
+  GET — the panel simply had no way to learn the canonical name to ask for,
+  because `/status` only listed what already existed. It now also carries
+  `knownMaps`, and the scale path does that GET before giving up. The button
+  starts the map instead of explaining why it cannot.
+- Verified live: `POST /api/instances/SH_Arrakeen/scale {"replicas":1}` →
+  `{"ok":true,"previous":0}`, a UE5 instance on partition 3, and the panel
+  showing `SH_Arrakeen 1/1 healthy` — the exact action that failed for the
+  reporter. Go: 3 new cases in `known_maps_test.go` (recipes exposed, stable
+  order, empty without a template); Python: 5 in `test_admin_instances.py`,
+  including an older mock-k8s with no `knownMaps` field, which must degrade
+  rather than raise mid-request.
+- ⚠️ **Found while verifying, NOT fixed here:** scaling back to 0 leaves the
+  UE5 process running. The spawner terminated pid 2282 and reported success,
+  but the live server was pid 2297 — `DuneSandboxServer` forks, and the pidfile
+  does not name the survivor. mock-k8s then frees the pool slot while the
+  orphan still holds its ports, which is the same shape as the duplicate-
+  partition crash of #124, at shutdown instead of startup. Filed as the next
+  thing to look at.
 ## 2026-09-20 — `players` reads the right table again, and stops seeing double (#121)
 
 - **The listing had stopped working entirely.** `admin players` answered
