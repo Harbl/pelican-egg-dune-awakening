@@ -548,7 +548,12 @@ ln -sfn "$STATE/ue5-saved" "$SAVED_TARGET"
 USERSETTINGS="$STATE/ue5-saved/UserSettings"
 mkdir -p "$USERSETTINGS"
 
-for f in UserEngine.ini UserGame.ini; do
+# UserServerCustomSettings.ini is new in Update 1.5 and ships in the same depot
+# directory as the other two: 45 custom-rules keys (damage, XP, thirst, crafting
+# costs, building limits…) that the client now also reads back through its
+# "server settings" screen. Seeded like the rest — only when absent, so an
+# operator's edits are never overwritten.
+for f in UserEngine.ini UserGame.ini UserServerCustomSettings.ini; do
   if [ ! -f "$USERSETTINGS/$f" ] && [ -f "$DEPOT/scripts/setup/config/$f" ]; then
     cp "$DEPOT/scripts/setup/config/$f" "$USERSETTINGS/$f"
     log "  seeded admin file: UserSettings/$f"

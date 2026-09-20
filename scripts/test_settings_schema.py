@@ -14,7 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA = os.path.join(ROOT, "data", "admin", "settings-schema.json")
 
 VALID_TYPES = {"string", "float", "int", "bool", "cvarbool", "intlist", "struct", "array"}
-VALID_FILES = {"UserEngine", "UserGame", "UserOverrides", "ondemand"}
+VALID_FILES = {"UserEngine", "UserGame", "UserOverrides", "ondemand", "UserServerCustomSettings"}
 SECTIONED_FILES = {"UserGame", "UserOverrides"}
 VALID_CLIENT_GATED = {"yes", "no", "unknown"}
 REQUIRED = {"id", "file", "section", "key", "type", "default",
@@ -72,9 +72,12 @@ class TestSettingsSchema(unittest.TestCase):
                 self.assertTrue(s["section"].startswith("/"),
                                 f"{s['id']} {s['file']} section must be a /Script path")
 
-    def test_ondemand_has_no_section(self):
+    def test_flat_files_have_no_section(self):
+        # ondemand.ini and Funcom's UserServerCustomSettings.ini (new in 1.5)
+        # are both flat key=value files: a section here would be written as a
+        # literal [header] the game never reads.
         for s in self.settings:
-            if s["file"] == "ondemand":
+            if s["file"] in ("ondemand", "UserServerCustomSettings"):
                 self.assertIsNone(s["section"], s["id"])
 
     def test_advanced_entries_not_boot_applied(self):
@@ -104,7 +107,18 @@ class TestSettingsSchema(unittest.TestCase):
         # + pvp_enabled_partitions + DD picker routing (issue #106)
         # + 5 QoL keys from the 2026-08 ecosystem survey (reconnect grace ×2,
         #   ping system ×3) + m_BaseBackupToolMapRestriction (C3.5)
-        self.assertEqual(len(self.settings), 202)
+        # + 39 from Funcom's UserServerCustomSettings.ini, new in Update 1.5:
+        #   the 45 keys it ships MINUS the 6 Funcom comments out itself because
+        #   they duplicate knobs we already write through UserEngine/UserGame
+        #   (PVPMode, GatheringAmount, bAllowSandstorms, bAllowSandworms,
+        #   bIsBuildingRestrictionsEnabled, FiefdomLimit). Exposing both paths
+        #   would give an operator two controls that can disagree.
+        self.assertEqual(len(self.settings), 241)
+        custom = [s for s in self.settings if s["file"] == "UserServerCustomSettings"]
+        self.assertEqual(len(custom), 39)
+        # None of them is boot-applied from an egg variable: they are panel-only,
+        # so adding them needs no egg re-import.
+        self.assertFalse([s for s in custom if s.get("env")])
         # the API-managed UClass knobs sink to UserOverrides, no env var
         uclass = [s for s in self.settings if s["file"] == "UserOverrides"]
         self.assertEqual(len(uclass), 150)
