@@ -13,6 +13,7 @@
 package serversetscale
 
 import (
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -216,6 +217,115 @@ func (s *Store) CurrentResourceVersion() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return strconv.FormatInt(s.resourceVersion, 10)
+}
+
+// MaterializeAll creates a ServerSetScale for every lazy-create recipe that
+// does not have one yet, and returns how many it created.
+//
+// The Director can only scale a map it sees in LIST, and LIST only carries
+// what has been materialised. Before this, the only non-warm maps that ever
+// got a record were the ones an operator had put in DUNE_ALWAYS_WARM_MAPS, so
+// every mission and hub map read:
+//
+//	Processing travel queue for ClassicalInstancing group CB_Story_BanditFortress01 (servers: [], num: 0)
+//
+// on every pass, and the player's travel request expired 300s later having
+// never had a destination.
+//
+// This costs nothing at rest: a recipe that is not always-warm carries
+// Replicas 0, so the record exists and no UE5 starts until the Director asks.
+// Existing objects are left untouched, so an operator's scale is never reset
+// and a second pass is a no-op (no spurious watch events).
+func (s *Store) MaterializeAll(namespace string) int {
+	s.mu.Lock()
+	lc := s.LazyCreator
+	s.mu.Unlock()
+	if lc == nil {
+		return 0
+	}
+	names := make([]string, 0, len(lc.Maps))
+	for name := range lc.Maps {
+		names = append(names, name)
+	}
+	sort.Strings(names) // deterministic order, so resourceVersions are stable run to run
+	created := 0
+	for _, name := range names {
+		if _, exists := s.Get(namespace, name); exists {
+			continue
+		}
+		if _, ok := s.GetOrLazyCreate(namespace, name); ok {
+			created++
+		}
+	}
+	return created
+}
+
+// ScaleUpTo raises an object's replicas to at least min. It returns the object
+// as it now stands, whether this call is what raised it, and whether the object
+// exists at all.
+//
+// It is a floor, never an assignment: one already at or above min is left
+// exactly as it is — no event, no resourceVersion bump, changed=false — so a
+// second travel request to a map that is already up cannot restart it, and
+// cannot pull an always-warm map down.
+//
+// Use this rather than Get, poke the spec, Update. Get returns the Object by
+// value but Spec is a map, so the copy ALIASES the stored one: writing into it
+// changes the store outside the lock, while handlers read it, and then
+// Update's change detection compares that map against itself, finds nothing,
+// and skips OnSpecChange — the spawner would not hear about the scale until
+// the next reconcile sweep. Here the read, the compare and the write all
+// happen under the one lock, the way Patch already does for the Director.
+func (s *Store) ScaleUpTo(namespace, name string, min int64) (obj Object, changed, ok bool) {
+	s.mu.Lock()
+	k := key{namespace, name}
+	obj, exists := s.objects[k]
+	if !exists {
+		s.mu.Unlock()
+		return Object{}, false, false
+	}
+	if replicasOf(obj.Spec) >= min {
+		s.mu.Unlock()
+		obj.Spec = cloneMap(obj.Spec)
+		return obj, false, true
+	}
+
+	spec := cloneMap(obj.Spec)
+	if spec == nil {
+		spec = map[string]any{}
+	}
+	spec["replicas"] = min
+	obj.Spec = spec
+	s.resourceVersion++
+	obj.Metadata.ResourceVersion = strconv.FormatInt(s.resourceVersion, 10)
+	obj.Metadata.Generation++
+	s.objects[k] = obj
+	s.broadcast(Event{Type: "MODIFIED", Object: obj})
+	cb := s.OnSpecChange
+	s.mu.Unlock()
+
+	if cb != nil {
+		cb(obj)
+	}
+	out := obj
+	out.Spec = cloneMap(spec)
+	return out, true, true
+}
+
+// replicasOf reads spec.replicas however it arrived: our own recipes build it
+// as int64, but anything that round-tripped through JSON — a Director PATCH, a
+// panel call — carries float64. An absent or unreadable value counts as 0,
+// which is the safe reading: it means "scale me up".
+func replicasOf(spec map[string]any) int64 {
+	switch v := spec["replicas"].(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	}
+	return 0
 }
 
 // Create inserts a new object, stamping resourceVersion/uid/creationTimestamp.
