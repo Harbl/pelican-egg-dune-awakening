@@ -20,7 +20,7 @@ import (
 
 // Pool is a fixed-size set of integer port pairs. Safe for concurrent use.
 type Pool struct {
-	mu      sync.Mutex
+	mu       sync.Mutex
 	gameBase int
 	igwBase  int
 	size     int

@@ -49,6 +49,7 @@ import (
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/serversetscale"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/spawner"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/stubs"
+	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/traveldemand"
 )
 
 func main() {
@@ -187,6 +188,17 @@ func run() error {
 				}
 			}
 			sssStore.LazyCreator = &lazy
+
+			// Materialise every recipe, not just the always-warm ones. The
+			// Director can only scale a map it sees in LIST, and it never asks
+			// for one by name on its own, so an unmaterialised mission map
+			// reads "(servers: [], num: 0)" on every travel-queue pass and the
+			// player's request expires 300s later with nowhere to go. Non-warm
+			// recipes carry replicas 0, so this creates records, not servers.
+			if n := sssStore.MaterializeAll("default"); n > 0 {
+				slog.Info("ServerSetScale records materialised for travel routing", "created", n)
+			}
+
 			slog.Info("ServerSetScale lazy-create wired",
 				"map_count", len(mapInfos), "always_warm", len(warmSet))
 
@@ -274,11 +286,74 @@ func run() error {
 	reconcileInterval := parseReconcileInterval(os.Getenv("MOCK_K8S_RECONCILE_INTERVAL"))
 	slog.Info("self-healing reconcile", "interval", reconcileInterval, "enabled", reconcileInterval > 0)
 	go spw.Reconcile(ctx, reconcileInterval)
+
+	// Start an instanced map when a player asks to travel there. The Director
+	// only routes to a group that already has a server and never creates the
+	// first one, so without this a mission or hub travel request sits in the
+	// queue until it expires 300s later. MaxConcurrentInstances finally means
+	// something: it caps how many maps demand may start.
+	if worldName != "" {
+		scaler := &demandScaler{store: sssStore, spawner: spw, world: worldName}
+		w := traveldemand.New(directorLogPath(baseDir), scaler, cfg.MaxConcurrentInstances)
+		go w.Run(ctx.Done(), parseTravelWatchInterval(os.Getenv("MOCK_K8S_TRAVEL_WATCH_INTERVAL")))
+	}
 	if err := server.Run(ctx, srv); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
 	slog.Info("mock-k8s shutdown complete")
 	return nil
+}
+
+// directorLogPath is where console.sh's launch_bg sends the Director's output.
+func directorLogPath(baseDir string) string {
+	return filepath.Join(baseDir, "logs", "director.log")
+}
+
+// parseTravelWatchInterval reads the poll interval for the travel-demand
+// watcher. Default 2s: a player is already waiting when the line appears, and
+// the read is a seek to a known offset, so a tight interval costs nothing. "off"
+// (or any non-positive value) disables the watcher.
+func parseTravelWatchInterval(raw string) time.Duration {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return 2 * time.Second
+	case "off", "0", "disabled":
+		return 0
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		return d
+	}
+	slog.Warn("traveldemand: unparseable MOCK_K8S_TRAVEL_WATCH_INTERVAL, using 2s", "value", raw)
+	return 2 * time.Second
+}
+
+// demandScaler is the traveldemand.Scaler over our store and spawner.
+type demandScaler struct {
+	store   *serversetscale.Store
+	spawner *spawner.Spawner
+	world   string
+}
+
+func (d *demandScaler) LiveInstances() int { return d.spawner.Snapshot().Instances.Tracked }
+
+// ScaleToOne raises a map to one replica, which the store hands to the
+// spawner via OnSpecChange, and reports whether this call is what started it.
+// GetOrLazyCreate first, so a map that somehow has no record yet still gets
+// one; ScaleUpTo then does the whole read-compare-write under the store's
+// lock, which is both what makes it idempotent — a map already at one or more
+// is left exactly as it is, so a second travel request never disturbs a live
+// instance — and what makes the spawner hear about it at once instead of on
+// the next reconcile sweep.
+func (d *demandScaler) ScaleToOne(mapName string) (bool, error) {
+	canonical := battlegroup.ServerSetScaleName(d.world, mapName)
+	if _, ok := d.store.GetOrLazyCreate("default", canonical); !ok {
+		return false, fmt.Errorf("no ServerSetScale for map %q (not in the BattleGroup template?)", mapName)
+	}
+	_, changed, ok := d.store.ScaleUpTo("default", canonical, 1)
+	if !ok {
+		return false, fmt.Errorf("could not scale ServerSetScale %q", canonical)
+	}
+	return changed, nil
 }
 
 // buildPlaceholders snapshots the env vars the world-template.yaml expects.
@@ -287,13 +362,13 @@ func run() error {
 // "{KEY}" in place (Director treats those as opaque strings).
 func buildPlaceholders() battlegroup.Placeholders {
 	return battlegroup.Placeholders{
-		"WORLD_NAME":         envOr("DUNE_WORLD_NAME", "dune-world"),
-		"WORLD_UNIQUE_NAME":  envOr("DUNE_WORLD_NAME", "dune-world"),
-		"WORLD_REGION":       envOr("DUNE_REGION", "Europe"),
-		"WORLD_DUNE_PASS":    envOr("DUNE_DB_PASS", "dune"),
+		"WORLD_NAME":          envOr("DUNE_WORLD_NAME", "dune-world"),
+		"WORLD_UNIQUE_NAME":   envOr("DUNE_WORLD_NAME", "dune-world"),
+		"WORLD_REGION":        envOr("DUNE_REGION", "Europe"),
+		"WORLD_DUNE_PASS":     envOr("DUNE_DB_PASS", "dune"),
 		"WORLD_POSTGRES_PASS": envOr("DUNE_PG_SUPER_PASS", "seabass"),
-		"WORLD_IMAGE_TAG":    envOr("DUNE_RELEASE_VERSION", "self-hosted"),
-		"FLS_SECRET":         envOr("DUNE_RMQ_SEC", ""),
+		"WORLD_IMAGE_TAG":     envOr("DUNE_RELEASE_VERSION", "self-hosted"),
+		"FLS_SECRET":          envOr("DUNE_RMQ_SEC", ""),
 	}
 }
 

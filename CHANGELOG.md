@@ -16,6 +16,67 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-21 — A travel request now starts the mission instance it asks for
+
+- **The missing half of instanced travel.** The Battlegroup Director routes a
+  player to a `ClassicalInstancing` group only if a server for that group
+  already exists, and it never creates the first one. Nothing on our side did
+  either, so every mission and hub destination read, once a minute:
+
+  ```
+  Processing travel queue for ClassicalInstancing group CB_Story_BanditFortress01 (servers: [], num: 0)
+  Travel request expired. MapName: CB_Story_BanditFortress01
+  ```
+
+  until `TravelRequestExpirationTimeSeconds` (300s) killed the request. That is
+  the five-minute "In Queue" a reporter measured, and why his mission instances
+  never launched even after the LIST fix in #130 — the Director could finally
+  *see* the maps, but still had nothing to route to.
+- **`mock-k8s` now watches the Director's own log.** The trigger was in there
+  all along, one line before the dead queue:
+
+  ```
+  Received travel request for 1 player(s) to CB_Story_BanditFortress01 (instancingMode=ClassicalInstancing)
+  ```
+
+  The new `internal/traveldemand` package tails `logs/director.log` (2s by
+  default, `MOCK_K8S_TRAVEL_WATCH_INTERVAL=off` disables it) and scales the
+  demanded map to one replica. Only `ClassicalInstancing` — `Dimension` and
+  `SingleServer` maps belong to AlwaysWarm and to `start-ue5-dimensions.sh`,
+  and scaling those from here would fight their owners. Map names are matched
+  against `^[A-Za-z0-9_]+$` before they are ever used to build a resource name
+  or a process argument.
+- **`MaxConcurrentInstances` finally means something.** Until now it was parsed,
+  logged and ignored; it is what caps how many maps demand may start.
+- **Every recipe is materialised at boot.** `Store.MaterializeAll` creates all
+  35 `ServerSetScale` records at startup with `replicas 0` — records, not
+  servers. The Director only scales what it can list, and on the reporter's
+  server the only maps ever materialised were the two he had put in
+  `DUNE_ALWAYS_WARM_MAPS`; everything else was a recipe nobody had asked for.
+- **`Store.ScaleUpTo` replaces "get it, poke the spec, update it".** `Get`
+  returns the object by value but its `Spec` is a map, so the copy *aliases* the
+  stored one: writing into it changed the store outside the lock, and then
+  `Update`'s change detection compared that map against itself, found nothing,
+  and skipped `OnSpecChange`. The spawner only noticed on the next reconcile
+  sweep — measured at **29 seconds** before the fix, versus the same second
+  after it. `ScaleUpTo` does the read, the compare and the write under the one
+  lock, and is a floor rather than an assignment: a second traveller to a live
+  map changes nothing, and an always-warm map cannot be pulled down.
+- **The watcher starts at the end of the log, not the beginning.**
+  `director.log` is append-only across restarts and reaches tens of megabytes;
+  it holds every travel request the server has ever served. A tailer starting at
+  offset 0 replayed all of them on its first tick — on the test box a restart
+  brought up a mission instance from a request eight minutes dead. It now primes
+  to the file's end, while a log that does not exist yet is read from the start
+  (the Director has not written it, so everything in it will be new). Truncation
+  is still detected: `rotate-logs.sh` trims in place, and a tailer that kept its
+  offset across that would go silently deaf.
+
+  Verified live end to end: request injected at 07:36:16.459, UE5 launched the
+  same second, and the Director listed the server in the group at 07:37:11 —
+  `servers: [27 (bMq8JJBjSTaTxy+ovvgKfg)]` — against a 300s budget. The one step
+  that cannot be tested from here is a real player completing the journey.
+
 ## 2026-09-20 — Update 1.5's custom-rules file is wired into the panel
 
 - **1.5 shipped a settings file we never seeded.** The patch notes say it
