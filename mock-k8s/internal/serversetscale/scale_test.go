@@ -118,3 +118,66 @@ func TestUpdate_WithAnAliasedSpecCannotDetectTheChange(t *testing.T) {
 	default:
 	}
 }
+
+// --- the reap side --------------------------------------------------------
+
+// The reaper works in map names (that is what the player-count query returns),
+// not resource names, and must only ever see what is actually scaled up.
+func TestScaledUpMapNames_ListsOnlyWhatIsRunning(t *testing.T) {
+	s, _ := scaleFixture(t)
+	if got := s.ScaledUpMapNames("default"); len(got) != 1 || got[0] != "Survival_1" {
+		t.Fatalf("got %v, want just the always-warm Survival_1 — the rest are materialised at 0", got)
+	}
+	s.ScaleUpTo("default", "sh-test-cb-bandit", 1)
+	got := s.ScaledUpMapNames("default")
+	if len(got) != 2 || got[0] != "CB_Story_BanditFortress01" || got[1] != "Survival_1" {
+		t.Errorf("got %v, want the two running maps in name order", got)
+	}
+}
+
+func TestScaleToZero_StopsTheInstanceAndTellsTheSpawner(t *testing.T) {
+	s, events := scaleFixture(t)
+	s.ScaleUpTo("default", "sh-test-cb-bandit", 1)
+	<-events
+
+	_, changed, ok := s.ScaleToZero("default", "sh-test-cb-bandit")
+	if !ok || !changed {
+		t.Fatalf("ScaleToZero ok=%v changed=%v, want both true", ok, changed)
+	}
+	select {
+	case got := <-events:
+		if r := readReplicasForTest(got); r != 0 {
+			t.Errorf("OnSpecChange saw replicas=%d, want 0", r)
+		}
+	default:
+		t.Fatal("OnSpecChange never fired — the UE5 process would keep running")
+	}
+	if got := s.ScaledUpMapNames("default"); len(got) != 1 {
+		t.Errorf("still listed as running: %v", got)
+	}
+}
+
+// Reaping something already at zero must be silent: the reaper polls, and a
+// spurious event would respawn-then-stop on every pass.
+func TestScaleToZero_OnAnAlreadyIdleMapIsANoOp(t *testing.T) {
+	s, events := scaleFixture(t)
+	_, changed, ok := s.ScaleToZero("default", "sh-test-cb-bandit")
+	if !ok {
+		t.Fatal("ScaleToZero reported failure on a materialised map")
+	}
+	if changed {
+		t.Error("reported a change on a map that was already idle")
+	}
+	select {
+	case <-events:
+		t.Error("fired OnSpecChange for a map that was already at zero")
+	default:
+	}
+}
+
+func TestScaleToZero_UnknownObjectReturnsFalse(t *testing.T) {
+	s, _ := scaleFixture(t)
+	if _, _, ok := s.ScaleToZero("default", "sh-test-does-not-exist"); ok {
+		t.Error("ScaleToZero invented an object")
+	}
+}

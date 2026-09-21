@@ -16,6 +16,52 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-21 — Instances a player asked for are given back when nobody is on them
+
+- **The watcher could only ever fill the budget.** Shipped that morning, it
+  starts a map when a player asks to travel there — and nothing ever stopped one
+  again. `MaxConcurrentInstances` is a budget over *every* tracked instance,
+  always-warm maps included. The reporter keeps **six** maps warm against a
+  budget of **eight**, so two on-demand slots existed on a world with thirty
+  instanced maps. The first two dungeons anyone visited took them and never gave
+  them back:
+
+  ```
+  traveldemand: at the instance cap, refusing to start a map a player asked for
+    map=Story_ArtOfKanly live=8 max=8
+  [16:16:50] group CB_Dungeon_OldCarthag (servers: [], num: 0)
+  [16:16:50] group CB_Story_Hephaestus   (servers: [], num: 0)
+  ```
+
+  His players could enter one dungeon and no other, until the next restart.
+- **`AutomaticStopDuration` is finally applied.** It has been in `ondemand.ini`
+  since the file existed — parsed, logged at boot, and used by nobody, exactly
+  like `MaxConcurrentInstances` before it. The new reaper in
+  `internal/traveldemand` stops any on-demand map that has sat empty for that
+  long (default 10m), freeing the slot. Poll interval
+  `MOCK_K8S_REAP_INTERVAL` (default 30s, `off` disables).
+- **What it will never do.** Touch an always-warm map — those are the operator's
+  floor. Reap on an unreadable player count: a failed query means *unknown*, not
+  *empty*, and reading it as empty would stop every instance on the server at
+  once. Or evict a group: a player arriving resets the countdown, which then
+  restarts from when they leave.
+- **The occupancy signal is the one the autoscaler already trusts.** The new
+  `internal/occupancy` runs `admin-publish farm-player-count`, which sums
+  `dune.farm_state.connected_players` per map. Not `dune.actors` — that groups a
+  character by their *persistent home map*, so a player visiting Arrakeen counts
+  under the map they came from, and a drain guard reading it sees the hub as
+  empty and evicts the visitor. That lesson was paid for once; it is not being
+  paid for again.
+- **The budget is stated out loud at boot.** Six warm maps against a budget of
+  eight was unworkable before the watcher existed, silently. mock-k8s now logs
+  `instance budget on_demand_slots=N`, and warns when N is two or fewer — or
+  zero, which means no player can travel anywhere at all.
+- ⚠️ **`ondemand.ini` is not hand-editable.** `apply-config.sh` regenerates it
+  from the admin settings store on every boot, so an edit to the file is gone
+  at the next restart. `MaxConcurrentInstances`, `AutomaticStopDuration` and
+  `AlwaysWarmMaps` are all exposed in the admin panel — that is the lever that
+  sticks.
+
 ## 2026-09-21 — A travel request now starts the mission instance it asks for
 
 - **The missing half of instanced travel.** The Battlegroup Director routes a
