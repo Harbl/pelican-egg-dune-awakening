@@ -312,6 +312,68 @@ func (s *Store) ScaleUpTo(namespace, name string, min int64) (obj Object, change
 	return out, true, true
 }
 
+// ScaleToZero stops a map: replicas 0, which the spawner picks up through
+// OnSpecChange. Returns the object, whether this call is what stopped it, and
+// whether it exists.
+//
+// A map already at zero is left completely alone — no event, no
+// resourceVersion bump. The reaper polls, so a spurious event on every pass
+// would have the spawner respawn-and-stop in a loop.
+func (s *Store) ScaleToZero(namespace, name string) (obj Object, changed, ok bool) {
+	s.mu.Lock()
+	k := key{namespace, name}
+	obj, exists := s.objects[k]
+	if !exists {
+		s.mu.Unlock()
+		return Object{}, false, false
+	}
+	if replicasOf(obj.Spec) == 0 {
+		s.mu.Unlock()
+		obj.Spec = cloneMap(obj.Spec)
+		return obj, false, true
+	}
+
+	spec := cloneMap(obj.Spec)
+	spec["replicas"] = int64(0)
+	obj.Spec = spec
+	s.resourceVersion++
+	obj.Metadata.ResourceVersion = strconv.FormatInt(s.resourceVersion, 10)
+	obj.Metadata.Generation++
+	s.objects[k] = obj
+	s.broadcast(Event{Type: "MODIFIED", Object: obj})
+	cb := s.OnSpecChange
+	s.mu.Unlock()
+
+	if cb != nil {
+		cb(obj)
+	}
+	out := obj
+	out.Spec = cloneMap(spec)
+	return out, true, true
+}
+
+// ScaledUpMapNames returns the MAP names — not the resource names — of every
+// object currently above zero replicas, sorted.
+//
+// Map names are what the reaper works in, because that is what the per-map
+// player-count query returns. Sorted so a caller's logs and decisions are
+// stable run to run.
+func (s *Store) ScaledUpMapNames(namespace string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for k, o := range s.objects {
+		if k.namespace != namespace || replicasOf(o.Spec) < 1 {
+			continue
+		}
+		if mn, _ := o.Spec["mapName"].(string); mn != "" {
+			out = append(out, mn)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // replicasOf reads spec.replicas however it arrived: our own recipes build it
 // as int64, but anything that round-tripped through JSON — a Director PATCH, a
 // panel call — carries float64. An absent or unreadable value counts as 0,

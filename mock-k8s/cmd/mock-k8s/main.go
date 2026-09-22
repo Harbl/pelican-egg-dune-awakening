@@ -42,6 +42,7 @@ import (
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/apigroup"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/battlegroup"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/health"
+	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/occupancy"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/ondemand"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/pool"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/sa"
@@ -114,6 +115,7 @@ func run() error {
 		"max_concurrent", cfg.MaxConcurrentInstances,
 		"auto_stop", cfg.AutomaticStopDuration,
 		"always_warm", cfg.AlwaysWarmMaps)
+	warnInstanceBudget(cfg)
 
 	// 4. Stand up the port pool.
 	portPool, err := pool.New(gameBase, igwBase, poolSize)
@@ -296,6 +298,15 @@ func run() error {
 		scaler := &demandScaler{store: sssStore, spawner: spw, world: worldName}
 		w := traveldemand.New(directorLogPath(baseDir), scaler, cfg.MaxConcurrentInstances)
 		go w.Run(ctx.Done(), parseTravelWatchInterval(os.Getenv("MOCK_K8S_TRAVEL_WATCH_INTERVAL")))
+
+		// And give the slot back. Without this the watcher can only ever fill
+		// the budget: a map it starts stays up forever, and once
+		// MaxConcurrentInstances is reached every later travel request is
+		// refused until the next restart. AutomaticStopDuration has been in
+		// ondemand.ini all along, parsed and applied by nobody.
+		r := traveldemand.NewReaper(scaler, occupancy.NewReader(baseDir),
+			cfg.AutomaticStopDuration, cfg.AlwaysWarmMaps)
+		go r.Run(ctx.Done(), parseReapInterval(os.Getenv("MOCK_K8S_REAP_INTERVAL")))
 	}
 	if err := server.Run(ctx, srv); err != nil {
 		return fmt.Errorf("serve: %w", err)
@@ -327,6 +338,48 @@ func parseTravelWatchInterval(raw string) time.Duration {
 	return 2 * time.Second
 }
 
+// warnInstanceBudget says out loud how much room on-demand travel actually
+// has. MaxConcurrentInstances is a budget over EVERY instance, always-warm
+// ones included, and the arithmetic is easy to get wrong quietly: one
+// reporter kept six maps warm against a budget of eight, so two dungeons
+// could exist at a time on a server with thirty of them. Nothing said so
+// until players could not get in.
+func warnInstanceBudget(cfg ondemand.Config) {
+	warm := len(cfg.AlwaysWarmMaps)
+	headroom := cfg.MaxConcurrentInstances - warm
+	switch {
+	case headroom <= 0:
+		slog.Warn("instance budget is already spent by the always-warm maps: no player can travel to any other map",
+			"max_concurrent", cfg.MaxConcurrentInstances, "always_warm", warm,
+			"fix", "raise MaxConcurrentInstances or shorten AlwaysWarmMaps in server/state/ondemand.ini")
+	case headroom <= 2:
+		slog.Warn("instance budget leaves very little room for travel",
+			"max_concurrent", cfg.MaxConcurrentInstances, "always_warm", warm,
+			"on_demand_slots", headroom,
+			"fix", "raise MaxConcurrentInstances or shorten AlwaysWarmMaps in server/state/ondemand.ini")
+	default:
+		slog.Info("instance budget", "on_demand_slots", headroom,
+			"max_concurrent", cfg.MaxConcurrentInstances, "always_warm", warm)
+	}
+}
+
+// parseReapInterval reads how often to look for maps nobody is on. Default
+// 30s: the decision itself is a ten-minute timer, so polling faster buys
+// nothing and each poll costs a psql round-trip. "off" disables reaping.
+func parseReapInterval(raw string) time.Duration {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return 30 * time.Second
+	case "off", "0", "disabled":
+		return 0
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		return d
+	}
+	slog.Warn("traveldemand: unparseable MOCK_K8S_REAP_INTERVAL, using 30s", "value", raw)
+	return 30 * time.Second
+}
+
 // demandScaler is the traveldemand.Scaler over our store and spawner.
 type demandScaler struct {
 	store   *serversetscale.Store
@@ -335,6 +388,19 @@ type demandScaler struct {
 }
 
 func (d *demandScaler) LiveInstances() int { return d.spawner.Snapshot().Instances.Tracked }
+
+// ScaledUpMaps and ScaleToZero are the reaper's half of the same adapter: the
+// watcher raises a map, the reaper lowers it, and both go through the store so
+// the spawner hears about it the same way.
+func (d *demandScaler) ScaledUpMaps() []string { return d.store.ScaledUpMapNames("default") }
+
+func (d *demandScaler) ScaleToZero(mapName string) error {
+	canonical := battlegroup.ServerSetScaleName(d.world, mapName)
+	if _, _, ok := d.store.ScaleToZero("default", canonical); !ok {
+		return fmt.Errorf("no ServerSetScale for map %q", mapName)
+	}
+	return nil
+}
 
 // ScaleToOne raises a map to one replica, which the store hands to the
 // spawner via OnSpecChange, and reports whether this call is what started it.
