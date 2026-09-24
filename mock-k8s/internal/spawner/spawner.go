@@ -36,8 +36,12 @@ import (
 
 const (
 	// terminateGrace is how long a UE5 instance gets to exit on SIGTERM
-	// during scale-down before mock-k8s escalates to SIGKILL.
-	terminateGrace = 15 * time.Second
+	// during scale-down or recycle before mock-k8s escalates to SIGKILL. It
+	// matches the terminationGracePeriodSeconds Funcom's own world-template
+	// gives every server set: UE5 runs a PreShutdown phase on SIGTERM, and
+	// until proc.Terminate waited for the whole process group the old 15s
+	// never actually applied to UE5 (only to its sh wrapper).
+	terminateGrace = 120 * time.Second
 
 	// pidWaitTimeout bounds how long capturePID keeps polling for the pidfile
 	// once start-ue5.sh has EXITED. While the script is still running the wait
@@ -118,8 +122,8 @@ type Spawner struct {
 	// backoff holds per-map crash-loop state, guarded by s.mu.
 	backoff map[string]backoffState
 
-	// draining counts, per map key, the instances Recycle has untracked but
-	// whose UE5 process has not exited yet. reconcileUpLocked spawns nothing
+	// draining counts, per map key, the instances scaleDown or Recycle has
+	// untracked but whose UE5 process has not exited yet. reconcileUpLocked spawns nothing
 	// for a draining key: the replacement would share the partition with the
 	// dying server. Guarded by s.mu.
 	draining      map[string]int
@@ -323,6 +327,10 @@ func (s *Spawner) scaleDown(key string, desired int) {
 	}
 	removed := append([]instance(nil), list[desired:]...)
 	s.instances[key] = append([]instance(nil), list[:desired]...)
+	// Hold the map until each removed UE5 has exited: a Director scale-up
+	// right after this must not put a new server on the partition the old
+	// one, still in PreShutdown, has not left.
+	s.draining[key] += len(removed)
 	s.mu.Unlock()
 
 	// Record the reduced ledger immediately; teardown persists again once
@@ -334,7 +342,18 @@ func (s *Spawner) scaleDown(key string, desired int) {
 		go func(inst instance) {
 			defer s.bg.Done()
 			s.teardown(key, inst)
+			s.mu.Lock()
+			s.finishDrainingLocked(key)
+			s.mu.Unlock()
 		}(inst)
+	}
+}
+
+// finishDrainingLocked records that one untracked instance of key has
+// finished shutting down. Caller holds s.mu.
+func (s *Spawner) finishDrainingLocked(key string) {
+	if s.draining[key]--; s.draining[key] <= 0 {
+		delete(s.draining, key)
 	}
 }
 

@@ -189,3 +189,46 @@ func TestRecycle_ReportsNoRespawnWhenScaleGone(t *testing.T) {
 		t.Fatal("Recycle reported a respawn although the ServerSetScale is gone")
 	}
 }
+
+// A Director scale-down followed quickly by a scale-up must not start the new
+// server while the old one is still shutting down: a UE5 in PreShutdown is
+// still in the farm on its partition.
+func TestScaleDown_NoRespawnUntilOldProcessGone(t *testing.T) {
+	spw, _ := newLoopSpawner(t)
+	spw.store.Create(sssObj("dd", "DeepDesert_1", 1))
+	spw.store.OnSpecChange = spw.OnSpecChange
+	old := spawnOneLive(t, spw, "default/dd")
+
+	var duringShutdown = -1
+	release := make(chan struct{})
+	spw.terminate = func(pid int, grace time.Duration) error {
+		<-release // the old UE5 is still shutting down
+		return proc.Terminate(pid, grace)
+	}
+
+	obj, _ := spw.store.Get("default", "dd")
+	obj.Spec["replicas"] = int64(0)
+	spw.OnSpecChange(obj) // scale-down: teardown starts, blocked on release
+
+	obj.Spec["replicas"] = int64(1)
+	spw.OnSpecChange(obj) // the Director changes its mind
+	spw.reconcileTick()
+	spw.mu.Lock()
+	duringShutdown = len(spw.instances["default/dd"])
+	spw.mu.Unlock()
+	close(release)
+	spw.Wait()
+	waitDead(old.PID)
+
+	if duringShutdown != 0 {
+		t.Fatalf("%d replacement(s) started while the scaled-down UE5 was still shutting down", duringShutdown)
+	}
+	spw.reconcileTick() // once it is gone, the map comes back
+	spw.Wait()
+	spw.mu.Lock()
+	after := len(spw.instances["default/dd"])
+	spw.mu.Unlock()
+	if after != 1 {
+		t.Errorf("tracked %d after the old process exited, want 1", after)
+	}
+}

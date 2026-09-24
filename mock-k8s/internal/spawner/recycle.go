@@ -77,9 +77,7 @@ func (s *Spawner) Recycle(key, suffix string) (bool, error) {
 	s.reconcileMu.Lock()
 	defer s.reconcileMu.Unlock()
 	s.mu.Lock()
-	if s.draining[key]--; s.draining[key] <= 0 {
-		delete(s.draining, key)
-	}
+	s.finishDrainingLocked(key)
 	if !stopped {
 		// Still the live server: keep tracking it rather than start a second
 		// one beside it.

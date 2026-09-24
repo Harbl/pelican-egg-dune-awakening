@@ -61,6 +61,23 @@ Issue #119. **Reinstall** to pick it up.
     previous one to be back (bounded at 15 min).
   - Keep retrying a server that refuses to stop: it stays tracked, nothing
     starts beside it, and the next try comes 30 min later.
+- **Stopping a server now waits for the server, not its launcher.** Found
+  while testing this live: every UE5 pidfile holds the
+  `sh DuneSandboxServer.sh` wrapper, which dies on SIGTERM at once, while the
+  UE5 binary beside it enters PreShutdown and can stay there. A Deep Desert
+  did for over ten minutes, still in the farm on partition 8.
+  - `proc.Terminate` waited on the wrapper only. It returned at once, freed the
+    port slot, never sent the SIGKILL, and left that server running untracked:
+    the next Deep Desert start would have collided with it.
+  - `admin-publish dimension-down` had the same wait, and so did the DD
+    autoscaler and the sietch controls that call it.
+  - Both now wait for the whole process group and SIGKILL it once the grace is
+    spent. mock-k8s's grace goes from 15 s to 120 s, the
+    `terminationGracePeriodSeconds` in Funcom's own world template; before
+    this, the 15 s never actually applied to UE5.
+  - A Director scale-down now also holds the map as draining until the old
+    process is gone, so a quick scale-down/scale-up cannot put two servers on
+    one partition.
 - **Settings.**
   - `MOCK_K8S_CORIOLIS_INTERVAL`: poll interval, default `1m`; `off`
     disables the watcher.
