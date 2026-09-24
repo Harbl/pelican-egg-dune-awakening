@@ -36,12 +36,18 @@ Issue #119. **Reinstall** to pick it up.
   On Funcom's side, the battlegroup operator restarts servers on a schedule
   (`restartSchedule`). mock-k8s replaces that operator, so nothing restarted
   the Deep Desert.
-- **mock-k8s now restarts only the Deep Desert, two minutes after the
-  boundary.** The new `internal/coriolis` watcher reads the boundary from each
+- **mock-k8s now restarts only the Deep Desert, every dimension of it, two
+  minutes after the boundary.** The new `internal/coriolis` watcher reads the boundary from each
   instance's own boot line (`Next Coriolis Cycle start date UTC: …`), so it
   follows whatever cycle the game computes rather than a hard-coded "Tuesday
   05:00". It then recycles that instance: SIGTERM, which saves its state, and
   a fresh boot that applies the new cycle.
+  - Every dimension is covered. Dimension 0 is a mock-k8s instance and is
+    recycled in place. Dimensions 1..N (`DUNE_DD_DIMENSIONS`, default 3) are
+    started outside mock-k8s by `spawn-dimension.sh`, so they are restarted
+    through the same `admin-publish dimension-down` / `dimension-up` verbs the
+    sietch controls use. A parked or downed dimension has no pidfile and is
+    never touched.
   - Hagga, Arrakeen and the dungeons stay up.
   - It does not need the Pelican API variables the ⏰ scheduled restart does.
 - **What it will never do.**

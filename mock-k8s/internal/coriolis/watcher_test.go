@@ -79,7 +79,7 @@ type harness struct {
 func newHarness(t *testing.T, insts ...spawner.InstanceRef) *harness {
 	t.Helper()
 	h := &harness{rec: &fakeRecycler{insts: insts}, dir: t.TempDir()}
-	h.w = New(h.rec, h.dir, []string{"DeepDesert_1"}, 2*time.Minute)
+	h.w = New([]Source{NewSpawnerSource(h.rec, h.dir, []string{"DeepDesert_1"})}, 2*time.Minute)
 	h.w.now = func() time.Time { return h.now }
 	return h
 }

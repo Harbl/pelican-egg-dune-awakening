@@ -293,7 +293,10 @@ func run() error {
 	// Restart the Deep Desert after each Coriolis boundary (#119). The game
 	// applies a new cycle only when a server boots, and Funcom's operator,
 	// which restarts servers on a schedule, is exactly what mock-k8s replaces.
-	cw := coriolis.New(spw, baseDir, coriolisMaps, parseCoriolisDelay(os.Getenv("MOCK_K8S_CORIOLIS_DELAY")))
+	cw := coriolis.New([]coriolis.Source{
+		coriolis.NewSpawnerSource(spw, baseDir, coriolisMaps), // dimension 0
+		coriolis.NewDimensionSource(baseDir, coriolisMaps),    // dimensions 1..N
+	}, parseCoriolisDelay(os.Getenv("MOCK_K8S_CORIOLIS_DELAY")))
 	go cw.Run(ctx.Done(), parseDurationEnv("MOCK_K8S_CORIOLIS_INTERVAL", os.Getenv("MOCK_K8S_CORIOLIS_INTERVAL"), time.Minute))
 
 	// Start an instanced map when a player asks to travel there. The Director

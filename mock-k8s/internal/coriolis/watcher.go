@@ -33,15 +33,13 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/spawner"
 )
 
 const (
 	nextCycleMarker = "Next Coriolis Cycle start date UTC: "
 	cycleLayout     = "2006.01.02-15.04.05"
 
-	// retryCooldown spaces out attempts on one instance after a failed
+	// retryCooldown spaces out attempts on one server after a failed
 	// recycle, so a server that refuses to stop is not hammered every tick.
 	retryCooldown = 30 * time.Minute
 	// staggerBound is how long the next recycle waits for the previous
@@ -50,20 +48,39 @@ const (
 	staggerBound = 15 * time.Minute
 )
 
-// Recycler is the spawner side: list a map's instances, restart one in place.
-type Recycler interface {
-	InstancesOf(mapName string) []spawner.InstanceRef
-	// Recycle restarts one instance and reports whether a replacement was
-	// started.
-	Recycle(key, suffix string) (bool, error)
+// Target is one Deep Desert server the watcher may restart.
+type Target struct {
+	// Group names the server slot across a restart: the replacement may run
+	// under a new pid (and, for mock-k8s, a new pool suffix), but it belongs
+	// to the same group. The stagger waits on it.
+	Group string
+	// LogPath is the server's UE5 log, which carries its boundary line. It is
+	// also the identity for "already recycled for this boundary".
+	LogPath string
+	// Live is true once the server has a running pid. A server still booting
+	// may have a log that ends with the PREVIOUS boot's lines.
+	Live bool
+
+	key, suffix string // spawner targets
+	partition   string // dimension targets
 }
 
-// Watcher recycles instances of the configured maps once their Coriolis
-// boundary has passed.
+// Source lists the servers it manages and restarts one of them.
+type Source interface {
+	Targets() []Target
+	// Recycle restarts t and reports whether a replacement was started.
+	Recycle(t Target) (respawned bool, err error)
+}
+
+type candidate struct {
+	src Source
+	t   Target
+}
+
+// Watcher restarts Deep Desert servers once their Coriolis boundary has
+// passed.
 type Watcher struct {
-	rec     Recycler
-	baseDir string
-	maps    []string
+	sources []Source
 	delay   time.Duration
 	now     func() time.Time
 
@@ -72,20 +89,18 @@ type Watcher struct {
 	attempted map[string]time.Time // log path -> last recycle attempt
 	warned    map[string]bool      // log path -> "no cycle line" already logged
 
-	// waitKey is the ServerSetScale whose replacement the next recycle waits
-	// for, so several Deep Desert instances restart one at a time.
-	waitKey   string
+	// waitGroup is the server slot whose replacement the next recycle waits
+	// for, so the Deep Desert servers restart one at a time.
+	waitGroup string
 	waitSince time.Time
 }
 
-// New builds a watcher. delay is how long after the boundary to act: the
-// storm's own end-of-cycle handling runs at the boundary, and restarting in
-// the same second would race it.
-func New(rec Recycler, baseDir string, maps []string, delay time.Duration) *Watcher {
+// New builds a watcher over sources. delay is how long after the boundary to
+// act: the storm's own end-of-cycle handling runs at the boundary, and
+// restarting in the same second would race it.
+func New(sources []Source, delay time.Duration) *Watcher {
 	return &Watcher{
-		rec:       rec,
-		baseDir:   baseDir,
-		maps:      append([]string(nil), maps...),
+		sources:   append([]Source(nil), sources...),
 		delay:     delay,
 		now:       time.Now,
 		tails:     map[string]*tail{},
@@ -101,7 +116,7 @@ func (w *Watcher) Run(stop <-chan struct{}, interval time.Duration) {
 		slog.Info("coriolis: recycle watcher disabled")
 		return
 	}
-	slog.Info("coriolis: recycle watcher started", "interval", interval, "delay", w.delay, "maps", w.maps)
+	slog.Info("coriolis: recycle watcher started", "interval", interval, "delay", w.delay)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -114,33 +129,23 @@ func (w *Watcher) Run(stop <-chan struct{}, interval time.Duration) {
 	}
 }
 
-type candidate struct {
-	mapName string
-	ref     spawner.InstanceRef
-}
-
-// Tick recycles at most one instance whose boundary has passed. Never returns
+// Tick recycles at most one server whose boundary has passed. Never returns
 // an error: it runs beside a live server, and one bad poll must not stop the
 // next.
 func (w *Watcher) Tick() {
 	now := w.now()
 	var cands []candidate
-	for _, m := range w.maps {
-		for _, ref := range w.rec.InstancesOf(m) {
-			cands = append(cands, candidate{mapName: m, ref: ref})
+	for _, src := range w.sources {
+		for _, t := range src.Targets() {
+			cands = append(cands, candidate{src: src, t: t})
 		}
 	}
-	sort.Slice(cands, func(i, j int) bool {
-		if cands[i].ref.Key != cands[j].ref.Key {
-			return cands[i].ref.Key < cands[j].ref.Key
-		}
-		return cands[i].ref.Suffix < cands[j].ref.Suffix
-	})
+	sort.Slice(cands, func(i, j int) bool { return cands[i].t.LogPath < cands[j].t.LogPath })
 
-	// Keep every tail current, even for instances we will not act on this
-	// tick, so a fresh boot's line is never mistaken for an old one later.
+	// Keep every tail current, even for servers we will not act on this tick,
+	// so a fresh boot's line is never mistaken for an old one later.
 	for _, c := range cands {
-		w.tailFor(w.logPath(c.mapName, c.ref.Suffix)).refresh()
+		w.tailFor(c.t.LogPath).refresh()
 	}
 
 	if w.waitingForReplacement(now, cands) {
@@ -156,19 +161,19 @@ func (w *Watcher) Tick() {
 // waitingForReplacement reports whether the previous recycle's replacement is
 // still booting (and within staggerBound).
 func (w *Watcher) waitingForReplacement(now time.Time, cands []candidate) bool {
-	if w.waitKey == "" {
+	if w.waitGroup == "" {
 		return false
 	}
 	for _, c := range cands {
-		if c.ref.Key == w.waitKey && c.ref.PID > 0 {
-			w.waitKey = ""
+		if c.t.Group == w.waitGroup && c.t.Live {
+			w.waitGroup = ""
 			return false
 		}
 	}
 	if now.Sub(w.waitSince) > staggerBound {
-		slog.Warn("coriolis: recycled instance has not come back; moving on",
-			"key", w.waitKey, "waited", now.Sub(w.waitSince).Round(time.Second))
-		w.waitKey = ""
+		slog.Warn("coriolis: recycled server has not come back; moving on",
+			"group", w.waitGroup, "waited", now.Sub(w.waitSince).Round(time.Second))
+		w.waitGroup = ""
 		return false
 	}
 	return true
@@ -177,18 +182,16 @@ func (w *Watcher) waitingForReplacement(now time.Time, cands []candidate) bool {
 // maybeRecycle recycles c if its boundary has passed and it has not been
 // recycled for that boundary yet. Reports whether it attempted a recycle.
 func (w *Watcher) maybeRecycle(now time.Time, c candidate) bool {
-	path := w.logPath(c.mapName, c.ref.Suffix)
-	// An instance without a pid is still booting, and its log may still end
-	// with the PREVIOUS boot's lines. Only a running server is judged.
-	if c.ref.PID <= 0 {
+	path := c.t.LogPath
+	if !c.t.Live {
 		return false
 	}
 	next := w.tails[path].next
 	if next.IsZero() {
 		if !w.warned[path] {
 			w.warned[path] = true
-			slog.Warn("coriolis: no cycle line in this instance's log; it will not be recycled at the boundary",
-				"key", c.ref.Key, "suffix", c.ref.Suffix, "log", path)
+			slog.Warn("coriolis: no cycle line in this server's log; it will not be recycled at the boundary",
+				"group", c.t.Group, "log", path)
 		}
 		return false
 	}
@@ -201,23 +204,19 @@ func (w *Watcher) maybeRecycle(now time.Time, c candidate) bool {
 
 	w.attempted[path] = now
 	slog.Info("coriolis: cycle boundary passed while the server was up; restarting it to apply the new cycle",
-		"map", c.mapName, "key", c.ref.Key, "suffix", c.ref.Suffix, "pid", c.ref.PID, "boundary", next.Format(time.RFC3339))
-	respawned, err := w.rec.Recycle(c.ref.Key, c.ref.Suffix)
+		"group", c.t.Group, "log", filepath.Base(path), "boundary", next.Format(time.RFC3339))
+	respawned, err := c.src.Recycle(c.t)
 	if err != nil {
 		slog.Warn("coriolis: recycle failed; will retry later",
-			"key", c.ref.Key, "suffix", c.ref.Suffix, "retry_after", retryCooldown, "err", err)
+			"group", c.t.Group, "retry_after", retryCooldown, "err", err)
 		return true
 	}
 	w.acted[path] = next
 	if respawned {
-		w.waitKey = c.ref.Key
+		w.waitGroup = c.t.Group
 		w.waitSince = now
 	}
 	return true
-}
-
-func (w *Watcher) logPath(mapName, suffix string) string {
-	return filepath.Join(w.baseDir, "logs", "ue5-"+mapName+"-"+suffix+".log")
 }
 
 func (w *Watcher) tailFor(path string) *tail {
