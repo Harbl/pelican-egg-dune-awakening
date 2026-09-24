@@ -53,7 +53,9 @@ const (
 // Recycler is the spawner side: list a map's instances, restart one in place.
 type Recycler interface {
 	InstancesOf(mapName string) []spawner.InstanceRef
-	Recycle(key, suffix string) error
+	// Recycle restarts one instance and reports whether a replacement was
+	// started.
+	Recycle(key, suffix string) (bool, error)
 }
 
 // Watcher recycles instances of the configured maps once their Coriolis
@@ -200,14 +202,17 @@ func (w *Watcher) maybeRecycle(now time.Time, c candidate) bool {
 	w.attempted[path] = now
 	slog.Info("coriolis: cycle boundary passed while the server was up; restarting it to apply the new cycle",
 		"map", c.mapName, "key", c.ref.Key, "suffix", c.ref.Suffix, "pid", c.ref.PID, "boundary", next.Format(time.RFC3339))
-	if err := w.rec.Recycle(c.ref.Key, c.ref.Suffix); err != nil {
+	respawned, err := w.rec.Recycle(c.ref.Key, c.ref.Suffix)
+	if err != nil {
 		slog.Warn("coriolis: recycle failed; will retry later",
 			"key", c.ref.Key, "suffix", c.ref.Suffix, "retry_after", retryCooldown, "err", err)
 		return true
 	}
 	w.acted[path] = next
-	w.waitKey = c.ref.Key
-	w.waitSince = now
+	if respawned {
+		w.waitKey = c.ref.Key
+		w.waitSince = now
+	}
 	return true
 }
 

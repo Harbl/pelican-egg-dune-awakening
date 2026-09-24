@@ -51,3 +51,14 @@ func TestParseDurationEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCoriolisDelay_NeverZero(t *testing.T) {
+	for _, raw := range []string{"", "off", "0", "-5s", "soon"} {
+		if got := parseCoriolisDelay(raw); got != 2*time.Minute {
+			t.Errorf("parseCoriolisDelay(%q) = %v, want the 2m default", raw, got)
+		}
+	}
+	if got := parseCoriolisDelay("5m"); got != 5*time.Minute {
+		t.Errorf("parseCoriolisDelay(5m) = %v", got)
+	}
+}

@@ -31,7 +31,9 @@ func (s *Spawner) InstancesOf(mapName string) []InstanceRef {
 
 // Recycle restarts one live instance in place: it stops the UE5 process
 // (SIGTERM, which saves its state) and then starts a fresh one for the same
-// map. It blocks until the old process has exited, up to terminateGrace.
+// map. It blocks until the old process has exited, up to terminateGrace, and
+// reports whether a replacement was started (false when the map's
+// ServerSetScale vanished meanwhile, so nothing should be waited for).
 //
 // The replacement is held back until the old process is gone. Two servers on
 // one partition claim the same IGW index and the incumbent dies on it, so the
@@ -41,7 +43,7 @@ func (s *Spawner) InstancesOf(mapName string) []InstanceRef {
 // An instance still starting (no pid yet) is refused: it has not read any
 // state worth refreshing, and stopping it mid-boot is the phantom case the
 // spawner already handles elsewhere.
-func (s *Spawner) Recycle(key, suffix string) error {
+func (s *Spawner) Recycle(key, suffix string) (bool, error) {
 	s.reconcileMu.Lock()
 	s.mu.Lock()
 	list := s.instances[key]
@@ -55,13 +57,13 @@ func (s *Spawner) Recycle(key, suffix string) error {
 	if idx < 0 {
 		s.mu.Unlock()
 		s.reconcileMu.Unlock()
-		return fmt.Errorf("recycle %s/%s: no such tracked instance", key, suffix)
+		return false, fmt.Errorf("recycle %s/%s: no such tracked instance", key, suffix)
 	}
 	inst := list[idx]
 	if inst.PID <= 0 {
 		s.mu.Unlock()
 		s.reconcileMu.Unlock()
-		return fmt.Errorf("recycle %s/%s: instance is still starting", key, suffix)
+		return false, fmt.Errorf("recycle %s/%s: instance is still starting", key, suffix)
 	}
 	s.instances[key] = append(list[:idx:idx], list[idx+1:]...)
 	s.draining[key]++
@@ -84,7 +86,7 @@ func (s *Spawner) Recycle(key, suffix string) error {
 		s.instances[key] = append(s.instances[key], inst)
 		s.mu.Unlock()
 		s.persist()
-		return fmt.Errorf("recycle %s/%s: could not stop pid %d; left it running", key, suffix, inst.PID)
+		return false, fmt.Errorf("recycle %s/%s: could not stop pid %d; left it running", key, suffix, inst.PID)
 	}
 	s.recycledTotal++
 	s.mu.Unlock()
@@ -93,8 +95,7 @@ func (s *Spawner) Recycle(key, suffix string) error {
 	obj, ok := s.store.Get(ns, name)
 	if !ok {
 		slog.Warn("spawner: recycled an instance whose ServerSetScale is gone; not respawning", "key", key)
-		return nil
+		return false, nil
 	}
-	s.reconcileUpLocked(obj, false)
-	return nil
+	return s.reconcileUpLocked(obj, false) > 0, nil
 }

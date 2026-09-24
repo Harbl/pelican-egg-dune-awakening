@@ -45,8 +45,9 @@ func TestRecycle_RestartsInstanceWithFreshProcess(t *testing.T) {
 	spw.store.Create(sssObj("dd", "DeepDesert_1", 1))
 	old := spawnOneLive(t, spw, "default/dd")
 
-	if err := spw.Recycle("default/dd", old.Suffix); err != nil {
-		t.Fatalf("Recycle: %v", err)
+	respawned, err := spw.Recycle("default/dd", old.Suffix)
+	if err != nil || !respawned {
+		t.Fatalf("Recycle = %v, %v; want a respawn and no error", respawned, err)
 	}
 	spw.Wait()
 	waitDead(old.PID)
@@ -89,7 +90,7 @@ func TestRecycle_NoReplacementWhileOldProcessAlive(t *testing.T) {
 		return proc.Terminate(pid, grace)
 	}
 
-	if err := spw.Recycle("default/dd", old.Suffix); err != nil {
+	if _, err := spw.Recycle("default/dd", old.Suffix); err != nil {
 		t.Fatalf("Recycle: %v", err)
 	}
 	spw.Wait()
@@ -113,7 +114,7 @@ func TestRecycle_TerminateFailureKeepsIncumbent(t *testing.T) {
 	old := spawnOneLive(t, spw, "default/dd")
 	spw.terminate = func(int, time.Duration) error { return fmt.Errorf("simulated kill failure") }
 
-	if err := spw.Recycle("default/dd", old.Suffix); err == nil {
+	if _, err := spw.Recycle("default/dd", old.Suffix); err == nil {
 		t.Fatal("Recycle returned nil although the old process could not be stopped")
 	}
 	spw.reconcileTick()
@@ -133,14 +134,14 @@ func TestRecycle_TerminateFailureKeepsIncumbent(t *testing.T) {
 
 func TestRecycle_RefusesUnknownAndStartingInstances(t *testing.T) {
 	spw, _ := newLoopSpawner(t)
-	if err := spw.Recycle("default/nope", "p0"); err == nil {
+	if _, err := spw.Recycle("default/nope", "p0"); err == nil {
 		t.Error("Recycle of an untracked instance returned nil")
 	}
 
 	spw.mu.Lock()
 	spw.instances["default/dd"] = []instance{{Suffix: "p3", MapName: "DeepDesert_1", pidReady: make(chan struct{})}}
 	spw.mu.Unlock()
-	if err := spw.Recycle("default/dd", "p3"); err == nil {
+	if _, err := spw.Recycle("default/dd", "p3"); err == nil {
 		t.Error("Recycle of an instance still starting (pid 0) returned nil")
 	}
 	spw.mu.Lock()
@@ -167,5 +168,24 @@ func TestInstancesOf_ListsOnlyThatMap(t *testing.T) {
 		if r.Key == "default/hagga" {
 			t.Errorf("Hagga listed as a Deep Desert instance: %+v", r)
 		}
+	}
+}
+
+// A map whose ServerSetScale vanished during the shutdown gets no
+// replacement, and Recycle says so: the caller must not wait for one.
+func TestRecycle_ReportsNoRespawnWhenScaleGone(t *testing.T) {
+	spw, _ := newLoopSpawner(t)
+	spw.store.Create(sssObj("dd", "DeepDesert_1", 1))
+	old := spawnOneLive(t, spw, "default/dd")
+	spw.terminate = func(pid int, grace time.Duration) error {
+		spw.store.Delete("default", "dd")
+		return proc.Terminate(pid, grace)
+	}
+	respawned, err := spw.Recycle("default/dd", old.Suffix)
+	if err != nil {
+		t.Fatalf("Recycle: %v", err)
+	}
+	if respawned {
+		t.Fatal("Recycle reported a respawn although the ServerSetScale is gone")
 	}
 }

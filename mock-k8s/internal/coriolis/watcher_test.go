@@ -14,9 +14,10 @@ import (
 // restarting (pid 0), which is what the real spawner's replacement looks like
 // until its pidfile lands.
 type fakeRecycler struct {
-	insts []spawner.InstanceRef
-	calls []string
-	err   error
+	insts     []spawner.InstanceRef
+	calls     []string
+	err       error
+	noRespawn bool
 }
 
 func (f *fakeRecycler) InstancesOf(mapName string) []spawner.InstanceRef {
@@ -26,17 +27,17 @@ func (f *fakeRecycler) InstancesOf(mapName string) []spawner.InstanceRef {
 	return append([]spawner.InstanceRef(nil), f.insts...)
 }
 
-func (f *fakeRecycler) Recycle(key, suffix string) error {
+func (f *fakeRecycler) Recycle(key, suffix string) (bool, error) {
 	f.calls = append(f.calls, key+"|"+suffix)
 	if f.err != nil {
-		return f.err
+		return false, f.err
 	}
 	for i := range f.insts {
 		if f.insts[i].Key == key && f.insts[i].Suffix == suffix {
 			f.insts[i].PID = 0
 		}
 	}
-	return nil
+	return !f.noRespawn, nil
 }
 
 func (f *fakeRecycler) setLive(key string, pid int) {
@@ -304,5 +305,25 @@ func TestTailer_WaitsForCompleteLine(t *testing.T) {
 	}
 	if want := time.Date(2026, 6, 2, 5, 0, 0, 0, time.UTC); !tl.next.Equal(want) {
 		t.Fatalf("next = %v, want %v", tl.next, want)
+	}
+}
+
+// No replacement was started (its ServerSetScale vanished): the other DD
+// instances must not wait the stagger bound for it.
+func TestTick_NoStaggerWaitWithoutReplacement(t *testing.T) {
+	h := newHarness(t,
+		ddInstance("default/dd-a", "p2", 100),
+		ddInstance("default/dd-b", "p3", 200))
+	h.rec.noRespawn = true
+	mkLogDir(t, h)
+	for _, sfx := range []string{"p2", "p3"} {
+		appendLog(t, h.logOf(sfx), bootLines("2026.05.26-05.00.00", "2026.06.02-05.00.00"))
+	}
+	h.at("2026.06.02-05.03.00")
+	h.w.Tick()
+	h.at("2026.06.02-05.04.00")
+	h.w.Tick()
+	if len(h.rec.calls) != 2 {
+		t.Fatalf("calls = %v, want the second instance recycled on the next tick", h.rec.calls)
 	}
 }

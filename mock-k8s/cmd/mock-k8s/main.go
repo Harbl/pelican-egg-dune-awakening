@@ -293,8 +293,7 @@ func run() error {
 	// Restart the Deep Desert after each Coriolis boundary (#119). The game
 	// applies a new cycle only when a server boots, and Funcom's operator,
 	// which restarts servers on a schedule, is exactly what mock-k8s replaces.
-	cw := coriolis.New(spw, baseDir, coriolisMaps,
-		parseDurationEnv("MOCK_K8S_CORIOLIS_DELAY", os.Getenv("MOCK_K8S_CORIOLIS_DELAY"), 2*time.Minute))
+	cw := coriolis.New(spw, baseDir, coriolisMaps, parseCoriolisDelay(os.Getenv("MOCK_K8S_CORIOLIS_DELAY")))
 	go cw.Run(ctx.Done(), parseDurationEnv("MOCK_K8S_CORIOLIS_INTERVAL", os.Getenv("MOCK_K8S_CORIOLIS_INTERVAL"), time.Minute))
 
 	// Start an instanced map when a player asks to travel there. The Director
@@ -372,6 +371,20 @@ func parseReapInterval(raw string) time.Duration {
 // restart at the boundary; Hagga and the dungeons read the cycle too but have
 // nothing to reshape.
 var coriolisMaps = []string{"DeepDesert_1"}
+
+// parseCoriolisDelay reads how long after the boundary to recycle. Unlike the
+// intervals, zero is not "off" here: it would restart in the very second the
+// game handles the end of the cycle. Anything non-positive falls back to the
+// default, loudly.
+func parseCoriolisDelay(raw string) time.Duration {
+	const def = 2 * time.Minute
+	d := parseDurationEnv("MOCK_K8S_CORIOLIS_DELAY", raw, def)
+	if d <= 0 {
+		slog.Warn("MOCK_K8S_CORIOLIS_DELAY must be positive, using default", "value", raw, "default", def)
+		return def
+	}
+	return d
+}
 
 // parseDurationEnv reads a watcher's duration setting: empty means fallback,
 // "off"/"0"/"disabled" (or any non-positive duration) means 0, which disables
