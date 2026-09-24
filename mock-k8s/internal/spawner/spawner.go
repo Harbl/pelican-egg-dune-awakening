@@ -117,6 +117,13 @@ type Spawner struct {
 
 	// backoff holds per-map crash-loop state, guarded by s.mu.
 	backoff map[string]backoffState
+
+	// draining counts, per map key, the instances Recycle has untracked but
+	// whose UE5 process has not exited yet. reconcileUpLocked spawns nothing
+	// for a draining key: the replacement would share the partition with the
+	// dying server. Guarded by s.mu.
+	draining      map[string]int
+	recycledTotal int64
 }
 
 type instance struct {
@@ -163,6 +170,7 @@ func New(store *serversetscale.Store, pool *pool.Pool, scriptPath, baseDir strin
 		now:        time.Now,
 		startedAt:  time.Now(),
 		backoff:    make(map[string]backoffState),
+		draining:   make(map[string]int),
 		pidWait:    pidWaitTimeout,
 		pidHardCap: pidHardCapTimeout,
 	}
@@ -330,8 +338,10 @@ func (s *Spawner) scaleDown(key string, desired int) {
 	}
 }
 
-// teardown terminates one instance's UE5 process and releases its slot.
-func (s *Spawner) teardown(key string, inst instance) {
+// teardown terminates one instance's UE5 process and releases its slot. It
+// returns false only when the process could not be terminated and may still
+// be running (the slot then stays reserved).
+func (s *Spawner) teardown(key string, inst instance) bool {
 	// Wait for the spawn to have recorded its pid (or to have definitively
 	// failed) before deciding there's nothing to kill. A scale-down that
 	// lands in the spawn window would otherwise see pid==0 and orphan an
@@ -364,7 +374,7 @@ func (s *Spawner) teardown(key string, inst instance) {
 			// the slot, or a later spawn could collide on it.
 			slog.Error("spawner: terminate failed; keeping slot reserved",
 				"key", key, "suffix", inst.Suffix, "pid", pid, "index", inst.Allocation.Index, "err", err)
-			return
+			return false
 		}
 		slog.Info("spawner: terminated UE5 on scale-down", "key", key, "suffix", inst.Suffix, "pid", pid)
 		_ = os.Remove(pidPath)
@@ -372,6 +382,7 @@ func (s *Spawner) teardown(key string, inst instance) {
 	// Release the slot only now that the port is actually free.
 	s.pool.Release(inst.Allocation.Index)
 	s.persist()
+	return true
 }
 
 func (s *Spawner) spawnOne(obj serversetscale.Object, mapName string, partitionID, indexInSet int) {
