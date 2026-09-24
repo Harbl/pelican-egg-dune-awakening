@@ -16,6 +16,51 @@ here on the log is maintained with each merge.
   egg JSON** into the panel, then Reinstall. An imported egg is a copy; the
   panel never picks up new variables on its own.
 
+## 2026-09-24 — The Deep Desert reshapes when the Coriolis cycle ends, not at the next restart
+
+Issue #119. **Reinstall** to pick it up.
+
+- **The storm timer hit zero and nothing happened until a restart.** The game
+  applies a new Coriolis cycle only when a server **boots**. The seed and cycle
+  dates are read at startup, and the map wipe runs in the database function
+  `coriolis_update_seed`, which each server calls for its own map. Our test
+  server's log of the 2026-06-02 cycle shows it: the storm ran all night,
+  05:00 UTC passed with the Deep Desert up and nothing logged, and only the
+  07:32 boot printed
+
+  ```
+  LogCoriolis: Display: Current Coriolis World Seed: 3
+  LogCoriolis: Display: This Coriolis Cycle start date UTC: 2026.06.02-05.00.00
+  ```
+
+  On Funcom's side, the battlegroup operator restarts servers on a schedule
+  (`restartSchedule`). mock-k8s replaces that operator, so nothing restarted
+  the Deep Desert.
+- **mock-k8s now restarts only the Deep Desert, two minutes after the
+  boundary.** The new `internal/coriolis` watcher reads the boundary from each
+  instance's own boot line (`Next Coriolis Cycle start date UTC: …`), so it
+  follows whatever cycle the game computes rather than a hard-coded "Tuesday
+  05:00". It then recycles that instance: SIGTERM, which saves its state, and
+  a fresh boot that applies the new cycle.
+  - Hagga, Arrakeen and the dungeons stay up.
+  - It does not need the Pelican API variables the ⏰ scheduled restart does.
+- **What it will never do.**
+  - Start the replacement while the old server is still shutting down. The
+    map is held "draining" until the process has exited, because two servers
+    on one partition is the IGW index collision of the 1.5 crash loop.
+  - Restart an instance that is still booting. Its log may still end with the
+    previous boot's line.
+  - Restart twice for the same boundary.
+  - Restart several Deep Desert instances at once. The next one waits for the
+    previous one to be back (bounded at 15 min).
+  - Keep retrying a server that refuses to stop: it stays tracked, nothing
+    starts beside it, and the next try comes 30 min later.
+- **Settings.**
+  - `MOCK_K8S_CORIOLIS_INTERVAL`: poll interval, default `1m`; `off`
+    disables the watcher.
+  - `MOCK_K8S_CORIOLIS_DELAY`: delay after the boundary, default `2m`.
+  - `/status` gains `instances.recycledTotal`.
+
 ## 2026-09-21 — Instances a player asked for are given back when nobody is on them
 
 - **The watcher could only ever fill the budget.** Shipped that morning, it

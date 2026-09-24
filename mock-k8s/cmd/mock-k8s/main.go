@@ -41,6 +41,7 @@ import (
 
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/apigroup"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/battlegroup"
+	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/coriolis"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/health"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/occupancy"
 	"github.com/Sergentval/pelican-egg-dune-awakening/mock-k8s/internal/ondemand"
@@ -289,6 +290,13 @@ func run() error {
 	slog.Info("self-healing reconcile", "interval", reconcileInterval, "enabled", reconcileInterval > 0)
 	go spw.Reconcile(ctx, reconcileInterval)
 
+	// Restart the Deep Desert after each Coriolis boundary (#119). The game
+	// applies a new cycle only when a server boots, and Funcom's operator,
+	// which restarts servers on a schedule, is exactly what mock-k8s replaces.
+	cw := coriolis.New(spw, baseDir, coriolisMaps,
+		parseDurationEnv("MOCK_K8S_CORIOLIS_DELAY", os.Getenv("MOCK_K8S_CORIOLIS_DELAY"), 2*time.Minute))
+	go cw.Run(ctx.Done(), parseDurationEnv("MOCK_K8S_CORIOLIS_INTERVAL", os.Getenv("MOCK_K8S_CORIOLIS_INTERVAL"), time.Minute))
+
 	// Start an instanced map when a player asks to travel there. The Director
 	// only routes to a group that already has a server and never creates the
 	// first one, so without this a mission or hub travel request sits in the
@@ -325,17 +333,7 @@ func directorLogPath(baseDir string) string {
 // the read is a seek to a known offset, so a tight interval costs nothing. "off"
 // (or any non-positive value) disables the watcher.
 func parseTravelWatchInterval(raw string) time.Duration {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "":
-		return 2 * time.Second
-	case "off", "0", "disabled":
-		return 0
-	}
-	if d, err := time.ParseDuration(raw); err == nil {
-		return d
-	}
-	slog.Warn("traveldemand: unparseable MOCK_K8S_TRAVEL_WATCH_INTERVAL, using 2s", "value", raw)
-	return 2 * time.Second
+	return parseDurationEnv("MOCK_K8S_TRAVEL_WATCH_INTERVAL", raw, 2*time.Second)
 }
 
 // warnInstanceBudget says out loud how much room on-demand travel actually
@@ -367,17 +365,32 @@ func warnInstanceBudget(cfg ondemand.Config) {
 // 30s: the decision itself is a ten-minute timer, so polling faster buys
 // nothing and each poll costs a psql round-trip. "off" disables reaping.
 func parseReapInterval(raw string) time.Duration {
+	return parseDurationEnv("MOCK_K8S_REAP_INTERVAL", raw, 30*time.Second)
+}
+
+// coriolisMaps are the maps the Coriolis storm wipes. Only these need a
+// restart at the boundary; Hagga and the dungeons read the cycle too but have
+// nothing to reshape.
+var coriolisMaps = []string{"DeepDesert_1"}
+
+// parseDurationEnv reads a watcher's duration setting: empty means fallback,
+// "off"/"0"/"disabled" (or any non-positive duration) means 0, which disables
+// the watcher, and anything unparseable warns and falls back.
+func parseDurationEnv(name, raw string, fallback time.Duration) time.Duration {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
-		return 30 * time.Second
+		return fallback
 	case "off", "0", "disabled":
 		return 0
 	}
-	if d, err := time.ParseDuration(raw); err == nil {
+	if d, err := time.ParseDuration(strings.TrimSpace(raw)); err == nil {
+		if d < 0 {
+			return 0
+		}
 		return d
 	}
-	slog.Warn("traveldemand: unparseable MOCK_K8S_REAP_INTERVAL, using 30s", "value", raw)
-	return 30 * time.Second
+	slog.Warn("unparseable duration setting, using default", "var", name, "value", raw, "default", fallback)
+	return fallback
 }
 
 // demandScaler is the traveldemand.Scaler over our store and spawner.
